@@ -1,0 +1,12 @@
+Pytorch DDPM implementation
+https://github.com/lucidrains/denoising-diffusion-pytorch
+
+Gibbs-diffusion
+https://github.com/rubenohana/Gibbs-Diffusion
+
+Keras-tf-DDPM 
+https://keras.io/examples/generative/ddpm/
+
+Cold Diffusion
+https://arxiv.org/abs/2208.09392
+?Even when using completely deterministic degradations (e.g., blur, masking, and more), the training and test-time update rules that underlie diffusion models can be easily generalized to create generative models.
