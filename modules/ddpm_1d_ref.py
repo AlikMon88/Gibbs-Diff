@@ -62,7 +62,6 @@ def convert_image_to_fn(img_type, image):
     return image
 
 # normalization functions
-
 def normalize_to_neg_one_to_one(img):
     return img * 2 - 1
 
@@ -70,7 +69,6 @@ def unnormalize_to_zero_to_one(t):
     return (t + 1) * 0.5
 
 # data
-
 class Dataset1D(Dataset):
     def __init__(self, tensor: Tensor):
         super().__init__()
@@ -83,7 +81,6 @@ class Dataset1D(Dataset):
         return self.tensor[idx].clone()
 
 # small helper modules
-
 class Residual(Module):
     def __init__(self, fn):
         super().__init__()
@@ -120,7 +117,6 @@ class PreNorm(Module):
         return self.fn(x)
 
 # sinusoidal positional embeds
-
 class SinusoidalPosEmb(Module):
     def __init__(self, dim, theta = 10000):
         super().__init__()
@@ -154,7 +150,6 @@ class RandomOrLearnedSinusoidalPosEmb(Module):
         return fouriered
 
 # building block modules
-
 class Block(Module):
     def __init__(self, dim, dim_out, dropout = 0.):
         super().__init__()
@@ -394,7 +389,6 @@ class Unet1D(Module):
         return self.final_conv(x)
 
 # gaussian diffusion trainer class
-
 def extract(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
@@ -722,7 +716,6 @@ class GaussianDiffusion1D(Module):
         return self.p_losses(img, t, *args, **kwargs)
 
 # trainer class
-
 class Trainer1D(object):
     def __init__(
         self,
