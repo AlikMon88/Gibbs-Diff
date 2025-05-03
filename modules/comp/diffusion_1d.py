@@ -16,7 +16,7 @@ from tqdm.auto import tqdm
 
 ## Custom Modules
 from ..utils.helper import *
-from unet import *
+from .unet import *
 
 from torch.cuda.amp import autocast
 
@@ -106,7 +106,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
         register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        # calculations for posterior p(x_{t-1} | x_t, x_0)
 
         posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
@@ -133,13 +133,6 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
         self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
 
-    def summary(self):
-        model = GaussianDiffusion1D(
-            self.model,
-            self.seq_length,
-            self.timesteps
-        ).to(device)
-        torchsummary.summary(model, self.input_shape[::-1])
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
@@ -235,10 +228,12 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
         return img
 
-    @autocast('cuda', enabled = False)
+    ### Running the Inferencing on CUDA - for acceleration 
+    # @autocast('cuda', enabled = False)
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
+        ### ancestral sampling -> x_t-1 = alpha_bar * x_t + (1 - alpha_bar) * epsilon 
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
@@ -246,16 +241,18 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
     def p_losses(self, x_start, t, noise = None):
         b, c, n = x_start.shape
-        noise = default(noise, lambda: torch.randn_like(x_start))
 
         # noise sample
+        noise = default(noise, lambda: torch.randn_like(x_start))
 
+        ## x_t sampled at t -> x_start = x0
         x = self.q_sample(x_start = x_start, t = t, noise = noise)
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
+        ### self-conditioning on previsos iteration's clean estimate -> x0_hat_prev
         x_self_cond = None
         if self.self_condition and random() < 0.5:
             with torch.no_grad():
@@ -264,6 +261,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
         # predict and take gradient step
 
+        ## Predicts: gaussian noise added till t markov steps using the UNET (given x_t) 
         model_out = self.model(x, t, x_self_cond)
 
         target = noise
@@ -271,13 +269,14 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         loss = F.mse_loss(model_out, target, reduction = 'none')
         loss = reduce(loss, 'b ... -> b', 'mean')
 
+        ## Extract: Broadcast help - with shape [batch_size, 1, ..., 1]
         loss = loss * extract(self.loss_weight, t, loss.shape)
         return loss.mean()
 
     def forward(self, img, *args, **kwargs):
         b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
         assert n == seq_length, f'seq length must be {seq_length}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
+        t = torch.randint(0, self.num_timesteps, (b,), device=device).long() ### t ~ uniformly-sampled(0, 1) == batch_size
 
         img = self.normalize(img)
         return self.p_losses(img, t, *args, **kwargs)

@@ -99,10 +99,11 @@ def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=1e
         
         for noisy, clean in progress_bar:
             
+            optimizer.zero_grad()
+            
             noisy, clean = noisy.reshape(noisy.shape[0], 1, -1), clean.reshape(clean.shape[0], -1, 1)
             
             noisy, clean = noisy.to(device), clean.to(device)
-            optimizer.zero_grad()
             outputs = model(noisy).reshape(*clean.shape)
             
             loss = criterion(outputs, clean)

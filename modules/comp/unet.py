@@ -1,3 +1,7 @@
+'''
+UNET: Noise Predictor/Estimator Model - Modularized to fit into the Diffusion Pipeline
+'''
+
 import numpy as np
 import random
 import matplotlib.pyplot as plt
@@ -195,7 +199,20 @@ class Attention(Module):
 
         out = rearrange(out, 'b h n d -> b (h d) n')
         return self.to_out(out)
-    
+
+class final_regress(Module):
+    def __init__(self, init_dim, out_dim):
+        super().__init__()
+        self.out_dim = out_dim
+        self.final_regress_layer = nn.Conv1d(
+            in_channels=init_dim,
+            out_channels=self.out_dim,
+            kernel_size=1
+        )
+
+    def forward(self, x):
+        return self.final_regress_layer(x)
+
 
 class Unet1D(Module):
     def __init__(
@@ -246,7 +263,7 @@ class Unet1D(Module):
             fourier_dim = dim
 
         self.time_mlp = nn.Sequential(
-            sinu_pos_emb,
+            sinu_pos_emb, ## concated cos + sine for positional info
             nn.Linear(fourier_dim, time_dim),
             nn.GELU(),
             nn.Linear(time_dim, time_dim)
@@ -288,9 +305,10 @@ class Unet1D(Module):
         default_out_dim = channels * (1 if not learned_variance else 2)
         self.out_dim = default(out_dim, default_out_dim)
 
-        self.final_res_block = resnet_block(init_dim * 2, init_dim)
-        self.final_conv = nn.Conv1d(init_dim, self.out_dim, 1)
 
+        self.final_res_block = resnet_block(init_dim * 2, init_dim)
+        self.final_regress_conv = final_regress(init_dim, self.out_dim)
+        
     def forward(self, x, time, x_self_cond = None):
         if self.self_condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
@@ -332,7 +350,9 @@ class Unet1D(Module):
         x = torch.cat((x, r), dim = 1)
 
         x = self.final_res_block(x, t)
-        return self.final_conv(x)
+        x = self.final_regress_conv(x)
+        
+        return x
     
 
     def summary(self, x_shape, t_shape):
@@ -362,7 +382,7 @@ class Unet1D(Module):
                     output_shape = output[0].shape if output else None
                 else:
                     output_shape = output.shape
-                    
+
                 layer_info.append({
                     'name': name,
                     'type': module.__class__.__name__,
@@ -380,7 +400,7 @@ class Unet1D(Module):
         # Run a forward pass
         try:
             with torch.no_grad():
-                output = self(x, t)
+                output = self.forward(x, t)
             
             # Calculate total params
             total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
