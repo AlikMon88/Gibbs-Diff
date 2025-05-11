@@ -213,11 +213,27 @@ class final_regress(Module):
     def forward(self, x):
         return self.final_regress_layer(x)
 
+class time_regress(Module):
+    def __init__(self):
+        super().__init__()
+        self.predict_time = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),                # [B, C, T] -> [B, C, 1]
+            nn.Flatten(start_dim=1),                # [B, C, 1] -> [B, C]
+            nn.Linear(self.dim, self.dim // 2),
+            nn.GELU(),
+            nn.Linear(self.dim // 2, 1),                 # Output scalar t̂
+            nn.Sigmoid()                            # Ensure it's in [0, 1] since t is typically normalized
+        )
+
+    def forward(self, x):
+        return self.predict_time(x)
+
 
 class Unet1D(Module):
     def __init__(
         self,
         dim,
+        timesteps,
         init_dim = None,
         out_dim = None,
         dim_mults=(1, 2, 4, 8),
@@ -236,6 +252,7 @@ class Unet1D(Module):
 
         self.dim = dim
         self.dim_mults = dim_mults
+        self.timesteps = timesteps
 
         # determine dimensions
         self.channels = channels
@@ -308,8 +325,9 @@ class Unet1D(Module):
 
         self.final_res_block = resnet_block(init_dim * 2, init_dim)
         self.final_regress_conv = final_regress(init_dim, self.out_dim)
+        self.custom_time_layer = time_regress()
         
-    def forward(self, x, time, x_self_cond = None):
+    def forward(self, x, x_self_cond = None):
         if self.self_condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
             x = torch.cat((x_self_cond, x), dim = 1)
@@ -317,7 +335,10 @@ class Unet1D(Module):
         x = self.init_conv(x)
         r = x.clone()
 
-        t = self.time_mlp(time)
+        ## Regress t
+        t_hat = self.custom_time_layer(x)
+        t_hat = (t_hat * self.timesteps).long() ## for discretization of time = [0, num_timesteps]
+        t = self.time_mlp(t_hat)
 
         h = []
 
@@ -352,7 +373,7 @@ class Unet1D(Module):
         x = self.final_res_block(x, t)
         x = self.final_regress_conv(x)
         
-        return x
+        return x, t_hat
     
 
     def summary(self, x_shape, t_shape):

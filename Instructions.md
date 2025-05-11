@@ -10,10 +10,15 @@ You are reminded to comply with the requirements given in the Course Handbook re
 
 **Failure to include the wordcount and declarations of use of autogeneration tools will result in automatic loss of marks.**
 
-# Allocation
+# Allocation 
 
 You have been allocated the following project:
 
 ** 04 Listening to the Noise: Blind Denoising with Gibbs Diffusion **
 
 Please see the project booklet for detailed information.
+
+## CUSTOM INSTRUCTION 
+
+1. Create Docker for the repo project
+2. Create Sphinx automatic documentation

@@ -23,7 +23,6 @@ from torch.cuda.amp import autocast
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
-# gaussian diffusion trainer class
 def extract(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
@@ -121,7 +120,6 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
         # calculate loss weight
-
         snr = alphas_cumprod / (1 - alphas_cumprod)
 
         loss_weight = torch.ones_like(snr)
@@ -179,11 +177,11 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.no_grad()
-    def p_sample(self, x, t: int, x_self_cond = None, clip_denoised = True):
+    def p_sample(self, x, t: int, x_self_cond = None, clip_denoised = True): ## Ancestral sampling
         b, *_, device = *x.shape, x.device
         batched_times = torch.full((b,), t, device = x.device, dtype = torch.long)
         model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = clip_denoised)
-        noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
+        noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0 ## Noise injection for stochastic generatiion
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
 
@@ -195,7 +193,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
         x_start = None
 
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
+        for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps): ## Ancestral Sampling from surrogate distribution
             self_cond = x_start if self.self_condition else None
             img, x_start = self.p_sample(img, t, self_cond)
 
@@ -232,51 +230,56 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
     # @autocast('cuda', enabled = False)
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
-
-        ### ancestral sampling -> x_t-1 = alpha_bar * x_t + (1 - alpha_bar) * epsilon 
+        
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, x_start, t, noise = None):
+    def p_losses(self, x_start, t, noise=None):
+
         b, c, n = x_start.shape
 
-        # noise sample
+        # Generate noise if not given
         noise = default(noise, lambda: torch.randn_like(x_start))
 
-        ## x_t sampled at t -> x_start = x0
-        x = self.q_sample(x_start = x_start, t = t, noise = noise)
+        # Forward diffusion (sample x_t from q(x_t | x_0, t))
+        x = self.q_sample(x_start=x_start, t=t, noise=noise)
 
-        # if doing self-conditioning, 50% of the time, predict x_start from current set of times
-        # and condition with unet with that
-        # this technique will slow down training by 25%, but seems to lower FID significantly
-
-        ### self-conditioning on previsos iteration's clean estimate -> x0_hat_prev
+        # Self-conditioning
         x_self_cond = None
         if self.self_condition and random() < 0.5:
             with torch.no_grad():
                 x_self_cond = self.model_predictions(x, t).pred_x_start
                 x_self_cond.detach_()
 
-        # predict and take gradient step
+        # Model prediction (UNet output)
+        out = self.model(x, x_self_cond)  # Shape: [B, channels+1, T]
+        pred_noise, pred_t = out[:, :-1, :], out[:, -1:, :]
 
-        ## Predicts: gaussian noise added till t markov steps using the UNET (given x_t) 
-        model_out = self.model(x, t, x_self_cond)
+        # Target values
+        target_noise = noise
+        target_t = t.float().view(-1, 1, 1).expand_as(pred_t)  # Broadcast target_t
 
-        target = noise
+        # Losses
+        loss_noise = F.mse_loss(pred_noise, target_noise, reduction='none')
+        loss_noise = reduce(loss_noise, 'b ... -> b', 'mean')
 
-        loss = F.mse_loss(model_out, target, reduction = 'none')
-        loss = reduce(loss, 'b ... -> b', 'mean')
+        loss_t = F.mse_loss(pred_t, target_t, reduction='none')
+        loss_t = reduce(loss_t, 'b ... -> b', 'mean')
 
-        ## Extract: Broadcast help - with shape [batch_size, 1, ..., 1]
+        # Combine and weight
+        loss = loss_noise + loss_t
+
+        ## loss-weighted based on SNR at timestep t
         loss = loss * extract(self.loss_weight, t, loss.shape)
+
         return loss.mean()
 
     def forward(self, img, *args, **kwargs):
         b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
         assert n == seq_length, f'seq length must be {seq_length}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long() ### t ~ uniformly-sampled(0, 1) == batch_size
+        t = torch.randint(0, self.num_timesteps, (b,), device=device).long() ### t ~ uniformly-sampled(0, num_time_steps) == batch_size
 
         img = self.normalize(img)
         return self.p_losses(img, t, *args, **kwargs)
