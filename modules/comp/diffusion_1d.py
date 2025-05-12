@@ -21,7 +21,7 @@ from .unet import *
 from torch.cuda.amp import autocast
 
 
-ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
+ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_t', 'pred_x_start'])
 
 def extract(a, t, x_shape):
     b, *_ = t.shape
@@ -153,8 +153,9 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def model_predictions(self, x, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
-        model_output = self.model(x, t, x_self_cond)
+    def model_predictions(self, x, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
+        ## There might be some problem in joint training -- t --> deterministically predicts x_t --> which trains for pred_noise --> revert to t (MIGHT break the training)
+        model_output, t = self.model(x, x_self_cond)
         maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
 
         pred_noise = model_output
@@ -164,7 +165,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         if clip_x_start and rederive_pred_noise:
             pred_noise = self.predict_noise_from_start(x, t, x_start)
 
-        return ModelPrediction(pred_noise, x_start)
+        return ModelPrediction(pred_noise, t, x_start)
 
     def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):
         preds = self.model_predictions(x, t, x_self_cond)
@@ -254,12 +255,11 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
                 x_self_cond.detach_()
 
         # Model prediction (UNet output)
-        out = self.model(x, x_self_cond)  # Shape: [B, channels+1, T]
-        pred_noise, pred_t = out[:, :-1, :], out[:, -1:, :]
-
+        pred_noise, pred_t = self.model(x, x_self_cond)  # Shape: [B, channels+1, T]
+        
         # Target values
         target_noise = noise
-        target_t = t.float().view(-1, 1, 1).expand_as(pred_t)  # Broadcast target_t
+        target_t = t.float()  # Broadcast target_t
 
         # Losses
         loss_noise = F.mse_loss(pred_noise, target_noise, reduction='none')
@@ -269,9 +269,10 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         loss_t = reduce(loss_t, 'b ... -> b', 'mean')
 
         # Combine and weight
-        loss = loss_noise + loss_t
+        comp_w = 0.85
+        loss = comp_w * loss_noise + (1 - comp_w) * loss_t
 
-        ## loss-weighted based on SNR at timestep t
+        ## loss-weighted based on SNR at timestep t (batched/indexed at different t)
         loss = loss * extract(self.loss_weight, t, loss.shape)
 
         return loss.mean()

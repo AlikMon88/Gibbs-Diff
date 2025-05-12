@@ -214,14 +214,14 @@ class final_regress(Module):
         return self.final_regress_layer(x)
 
 class time_regress(Module):
-    def __init__(self):
+    def __init__(self, dim):
         super().__init__()
         self.predict_time = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),                # [B, C, T] -> [B, C, 1]
             nn.Flatten(start_dim=1),                # [B, C, 1] -> [B, C]
-            nn.Linear(self.dim, self.dim // 2),
+            nn.Linear(dim, dim // 2),
             nn.GELU(),
-            nn.Linear(self.dim // 2, 1),                 # Output scalar t̂
+            nn.Linear(dim // 2, 1),                 # Output scalar t̂
             nn.Sigmoid()                            # Ensure it's in [0, 1] since t is typically normalized
         )
 
@@ -325,7 +325,7 @@ class Unet1D(Module):
 
         self.final_res_block = resnet_block(init_dim * 2, init_dim)
         self.final_regress_conv = final_regress(init_dim, self.out_dim)
-        self.custom_time_layer = time_regress()
+        self.custom_time_layer = time_regress(self.dim)
         
     def forward(self, x, x_self_cond = None):
         if self.self_condition:
@@ -338,6 +338,8 @@ class Unet1D(Module):
         ## Regress t
         t_hat = self.custom_time_layer(x)
         t_hat = (t_hat * self.timesteps).long() ## for discretization of time = [0, num_timesteps]
+        t_hat = t_hat.reshape(t_hat.shape[0], )
+        
         t = self.time_mlp(t_hat)
 
         h = []
@@ -376,18 +378,18 @@ class Unet1D(Module):
         return x, t_hat
     
 
-    def summary(self, x_shape, t_shape):
+    def summary(self, x_shape):
         """
         Kears-style Summary of the Unet1D model architecture.
         
         Args:
             x_shape: Shape of input data tensor (batch_size, channels, seq_length)
-            t_shape: Shape of timestep tensor (batch_size,)
+            # t_shape: Shape of timestep tensor (batch_size,)
         """
         
         # Create example inputs
         x = torch.zeros(x_shape).to(device)
-        t = torch.zeros(t_shape, dtype=torch.long).to(device)
+        # t = torch.zeros(t_shape, dtype=torch.long).to(device)
         
         # Dictionary to store layer info
         layer_info = []
@@ -421,7 +423,7 @@ class Unet1D(Module):
         # Run a forward pass
         try:
             with torch.no_grad():
-                output = self.forward(x, t)
+                output, t = self.forward(x)
             
             # Calculate total params
             total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -437,7 +439,7 @@ class Unet1D(Module):
             
             # Input layers
             print(f"{'input_1 (InputLayer)':<40}{str(x_shape):<25}{'0':<15}")
-            print(f"{'input_2 (InputLayer)':<40}{str(t_shape):<25}{'0':<15}")
+            # print(f"{'input_2 (InputLayer)':<40}{str(t_shape):<25}{'0':<15}")
             
             # Display layer information
             for layer in layer_info:

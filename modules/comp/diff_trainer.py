@@ -131,13 +131,13 @@ class Trainer1D:
             self.step += 1
 
             # save and sample
-            if self.step % self.save_and_sample_every == 0:
-                self.ema.ema_model.eval()
-                with torch.no_grad():
-                    batches = num_to_groups(self.num_samples, self.batch_size)
-                    samples = [self.ema.ema_model.sample(batch_size=n) for n in batches]
-                    all_samples = torch.cat(samples, dim=0)
-                    torch.save(all_samples, self.results_folder / f'sample-{self.step // self.save_and_sample_every}.pt')
-                    self.save(self.step // self.save_and_sample_every)
+            # if self.step % self.save_and_sample_every == 0:
+            #     self.ema.ema_model.eval()
+            #     with torch.no_grad():
+            #         batches = num_to_groups(self.num_samples, self.batch_size)
+            #         samples = [self.ema.ema_model.sample(batch_size=n) for n in batches]
+            #         all_samples = torch.cat(samples, dim=0)
+            #         torch.save(all_samples, self.results_folder / f'sample-{self.step // self.save_and_sample_every}.pt')
+            #         self.save(self.step // self.save_and_sample_every)
 
         print('Training complete.')
