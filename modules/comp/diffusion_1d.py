@@ -138,11 +138,6 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
             extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
-    def predict_noise_from_start(self, x_t, t, x0):
-        return (
-            (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / \
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-        )
 
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
@@ -207,25 +202,6 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
         return sample_fn((batch_size, channels, seq_length))
 
-    @torch.no_grad()
-    def interpolate(self, x1, x2, t = None, lam = 0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = default(t, self.num_timesteps - 1)
-
-        assert x1.shape == x2.shape
-
-        t_batched = torch.full((b,), t, device = device)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t = t_batched), (x1, x2))
-
-        img = (1 - lam) * xt1 + lam * xt2
-
-        x_start = None
-
-        for i in tqdm(reversed(range(0, t)), desc = 'interpolation sample time step', total = t):
-            self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, i, self_cond)
-
-        return img
 
     ### Running the Inferencing on CUDA - for acceleration 
     # @autocast('cuda', enabled = False)
@@ -284,6 +260,101 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
         img = self.normalize(img)
         return self.p_losses(img, t, *args, **kwargs)
+
+#### -----------------------------------------------------------------------------------
+#### -----------------------------------------------------------------------------------
+#### -----------------------------------------------------------------------------------
+
+    def get_gdiff_loss(self, ts, batch, phi_ps=None):
+        
+        #phi should be a tensor of the size of the batch_size, we want a phi different for each batch element
+        #if batch is a list (the case of ImageFolder for ImageNet): take the first element, otherwise take batch:
+        if isinstance(batch, list):
+            batch = batch[0]
+
+        bs = batch.shape[0]
+        if phi_ps is None:
+            #sample phi_ps between -1 and 1
+            phi_ps = torch.rand(bs, 1, device=self.device)*2 - 1
+
+        #if phi is a scalar, cast to batch dimension. For training on a single phi.
+        if isinstance(phi_ps, float) or isinstance(phi_ps, int):
+            phi_ps = phi_ps * torch.ones(bs,1).to(self.device) 
+
+        noise_imgs = []
+
+        ### non-flat PSD colored-noise
+        epsilons = get_colored_noise_2d(batch.shape, phi_ps, device= self.device) #B x C x H x W
+
+        a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1, 1).to(self.device)
+        noise_imgs = torch.sqrt(a_hat) * batch + torch.sqrt(1 - a_hat) * epsilons ## x_t
+
+        e_hat = self.forward(noise_imgs, ts, phi_ps=phi_ps) ## since noise is parameterised by (phi)
+        loss = nn.functional.mse_loss(e_hat, epsilons)
+
+        return loss
+
+    def forward_gdiff(self, img, *args, **kwargs):
+        
+        b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
+        assert n == seq_length, f'seq length must be {seq_length}'
+        t = torch.randint(0, self.num_timesteps, (b,), device=device).long() ### t ~ uniformly-sampled(0, num_time_steps) == batch_size
+
+        img = self.normalize(img)
+        return self.get_gdiff_loss(img, t, *args, **kwargs)
+
+
+    @torch.no_grad()
+    def denoise_1step_gdiff(self, x, t, phi_ps=None):
+        """
+        Denoises one step given an phi (if phi_ps=None, it is sampled uniformly in [-1,1]) and a timestep t.
+        x_{t-1} = (1 / sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_bar_t)) * e_hat) + sqrt(beta_t) * z_phi
+        """
+        #phi should be a tensor of the size of the batch_size, we want a different phi for each batch element
+        if phi_ps is None:5
+            # If no phi_ps is given, assume it's white noise, i.e. phi_ps = 0
+            phi_ps = torch.zeros(x.shape[0],1, device=self.device).float()
+        
+        #if phi is a scalar, cast to batch dimension
+        if isinstance(phi_ps, int) or isinstance(phi_ps, float):
+            phi_ps = phi_ps * torch.ones(x.shape[0],1, device=self.device).float() 
+        
+        else: 
+            phi_ps = phi_ps.to(self.device).float()
+        
+        with torch.no_grad():
+            if t > 1:
+                z = get_colored_noise_2d(x.shape, phi_ps, device= self.device)
+            else:
+                z = 0
+            e_hat = self.forward(x, t.view(1, 1).repeat(x.shape[0], 1), phi_ps=phi_ps)
+            pre_scale = 1 / math.sqrt(self.alpha_t[t])
+            e_scale = (self.beta_t[t]) / math.sqrt(1 - self.alpha_bar_t[t])
+            post_sigma = math.sqrt(self.beta_t[t]) * z
+            x = pre_scale * (x - e_scale * e_hat) + post_sigma
+            return x
+    
+    @torch.no_grad()
+    def denoise_samples_batch_time(self, noisy_batch, timesteps, batch_origin=None, return_sample=False, phi_ps=None):
+        """
+        Denoises a batch of images for a given number of timesteps (which can be different across the batch).
+        """
+        max_timesteps = torch.max(timesteps)
+        mask = torch.ones(noisy_batch.shape[0], max_timesteps+1).to(self.device)
+        for i in range(noisy_batch.shape[0]):
+            mask[i, timesteps[i]+1:] = 0
+
+        ## Reverse-Diffusion
+        for t in range(max_timesteps, 0, -1):
+            noisy_batch = self.denoise_1step(noisy_batch, torch.tensor(t).cuda(), phi_ps) * (mask[:, t]).reshape(-1,1,1,1) + noisy_batch * (1 - mask[:, t]).reshape(-1,1,1,1)
+        if batch_origin is None:
+            return noisy_batch
+        else:
+            if return_sample:
+                return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), noisy_batch
+            else:
+                return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), None
+
 
 
 if __name__ == '__main__':

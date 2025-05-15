@@ -4,7 +4,7 @@ class DiffScore(pl.LightningModule):
     DDPM models are discrete-time score based models (noise-predictors) while score based SDE models simulates reverse SDE in continous-time space
     This paper implements DDPM + extra phi_embedding 
     ## I Should directly use 1D - LucidBrains DDPM execution
-    ## How are we denoising without t? get_closest_timestep()
+    ## How are we denoising without t? get_closest_timestep() --> matching based on minimum abs. t-difference across all the steps (Lookup approach)
 
     Attributes:
         diffustion_steps (int): Number of diffusion steps.
@@ -162,7 +162,7 @@ class DiffScore(pl.LightningModule):
         x_{t-1} = (1 / sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_bar_t)) * e_hat) + sqrt(beta_t) * z_phi
         """
         #phi should be a tensor of the size of the batch_size, we want a different phi for each batch element
-        if phi_ps is None:
+        if phi_ps is None:5
             # If no phi_ps is given, assume it's white noise, i.e. phi_ps = 0
             phi_ps = torch.zeros(x.shape[0],1, device=self.device).float()
         
@@ -219,14 +219,23 @@ class DiffScore(pl.LightningModule):
             else:
                 return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), None
 
-def get_closest_timestep(self, noise_level, ret_sigma=False):
+def get_closest_timestep(noise_level, ret_sigma=False):
         """
         Returns the closest timestep to the given noise level. If ret_sigma is True, also returns the noise level corresponding to the closest timestep.
         """
         alpha_bar_t = self.alpha_bar_t.to(noise_level.device)
-        all_noise_levels = torch.sqrt((1-alpha_bar_t)/alpha_bar_t).reshape(-1, 1).repeat(1, noise_level.shape[0])
+        all_noise_levels = torch.sqrt((1-alpha_bar_t)/alpha_bar_t).reshape(-1, 1).repeat(1, noise_level.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
+        print('Noise-Levels: ', all_noise_levels)
+        
         closest_timestep = torch.argmin(torch.abs(all_noise_levels - noise_level), dim=0)
+        print('Closest-Timesteps: ', cloesest_timestep)
+
         if ret_sigma:
             return closest_timestep, all_noise_levels[closest_timestep, 0]
         else:
             return closest_timestep
+
+if __name__ == '__main__':
+    
+    sigmas = [0.2]
+    _ = get_closeest_timestep(sigmas)
