@@ -142,6 +142,9 @@ class Trainer1D:
 
         print('Training complete.')
 
+#### -----------------------------------------------------------------------------------
+#### ---------------------------GibbsDIFF-----------------------------------------------
+#### -----------------------------------------------------------------------------------
 
 class Trainer1DGDiff:
     def __init__(
@@ -220,7 +223,7 @@ class Trainer1DGDiff:
                 batch = next(self.dl)
                 batch = batch.reshape(batch.shape[0], 1, -1)
                 
-                loss = self.model.forward_gdiff(batch) / self.gradient_accumulate_every
+                loss = self.model(batch) / self.gradient_accumulate_every
                 loss.backward()
                 total_loss += loss.item()
 

@@ -360,7 +360,7 @@ class Unet1D(Module):
         
         return x, t_hat
     
-
+    @torch.no_grad()
     def summary(self, x_shape):
         """
         Kears-style Summary of the Unet1D model architecture.
@@ -461,7 +461,8 @@ class PhiEmbedding(nn.Module):
     def forward(self, alpha):
         return self.mlp(alpha)
 
-# Basic Convolutional Block
+# Basic Convolutional Block 
+## GDiff paper takes 2 conv-layers - this has 1
 class BlockGDiff(Module):
     def __init__(self, dim, dim_out, dropout=0.):
         super().__init__()
@@ -476,7 +477,7 @@ class BlockGDiff(Module):
         x = self.norm(x)
         x = rearrange(x, 'b n c -> b c n')
         x = self.act(x)
-        return self.dropout(x)
+        return x
 
 # ResNet Block
 class ResnetBlockGDiff(Module):
@@ -582,71 +583,78 @@ class Unet1DGDiff(Module):
         self.dim = dim
         self.channels = channels
         self.self_condition = self_condition
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
         phi_dim = 1
 
-        H = math.sqrt(dim)
+        ## attn_dim
+        H = math.sqrt(1024)
         embed_size = int(H / 2)
 
+        nc_1, nc_2, nc_3, nc_4, nc_5 = dim, dim * 2, dim * 4, dim * 8, dim * 16
+        print('Dimension-Cluster: ', nc_1, nc_2, nc_3, nc_4, nc_5)
+
         # Initial convolution
-        self.init_conv = BlockGDiff(channels, 64)
+        self.init_conv = BlockGDiff(channels, nc_1)
 
         # Down blocks
         self.down_blocks = nn.ModuleList([
-            ResnetBlockGDiff(64, 128),
-            ResnetBlockGDiff(128, 256),
-            ResnetBlockGDiff(256, 512),
-            ResnetBlockGDiff(512, 1024)
+            ResnetBlockGDiff(nc_1, nc_2),  ## (64, 128) ..
+            ResnetBlockGDiff(nc_2, nc_3),
+            ResnetBlockGDiff(nc_3, nc_4),
+            ResnetBlockGDiff(nc_4, nc_5) ## (512, 1024)
         ])
 
         self.attn_blocks = nn.ModuleList([
             None,  # No attention in first two blocks
-            None,
-            SelfAttention(512, int(H / 8)),
-            SelfAttention(1024, int(H / 16))
+            None, 
+            SelfAttention(nc_4, int(H / 8)),  ## (512, int(H/2))
+            SelfAttention(nc_5, int(H / 16)) ## (1024, int(H/2))
         ])
 
         # Embeddings for time and phi
         self.time_embeddings = nn.ModuleList([
-            TimeEmbedding(128, embed_size),
-            TimeEmbedding(256, embed_size),
-            TimeEmbedding(512, embed_size),
-            TimeEmbedding(1024, embed_size)
+            TimeEmbedding(nc_2, embed_size), ## (128, )
+            TimeEmbedding(nc_3, embed_size), 
+            TimeEmbedding(nc_4, embed_size),
+            TimeEmbedding(nc_5, embed_size) ## (1024, )
         ])
 
         self.alpha_embeddings = nn.ModuleList([
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=128),
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=256),
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=512),
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=1024)
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_2), ## (, 128)
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_3),
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_4),
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_5) ## (, 1024)
         ])
 
         # Bottleneck
-        self.bottleneck = BlockGDiff(1024, 1024)
-        self.att_bottleneck = SelfAttention(1024, int(H / 16))
+        self.bottleneck = BlockGDiff(nc_5, nc_5) ## (1024, 1024)
+        self.att_bottleneck = SelfAttention(nc_5, int(H / 16))
+        self.bottl_down = BlockGDiff(nc_5, nc_4) ## (1024, 512)
 
         # Up blocks
         self.up_blocks = nn.ModuleList([
-            ResnetBlockGDiff(1024 + 512, 512),
-            ResnetBlockGDiff(512 + 256, 256),
-            ResnetBlockGDiff(256 + 128, 128),
-            ResnetBlockGDiff(128 + 64, 64)
+            ResnetBlockGDiff(nc_5 + nc_4, nc_4), ## (1024 + 512, 512)
+            ResnetBlockGDiff(nc_5, nc_3), ## (512 * 2, 256)
+            ResnetBlockGDiff(nc_4, nc_2), ## (256 * 2, 128)
+            ResnetBlockGDiff(nc_3, nc_1) ## (128 * 2, 64)
         ])
 
         self.time_embeddings_up = nn.ModuleList([
-            TimeEmbedding(512, embed_size),
-            TimeEmbedding(256, embed_size),
-            TimeEmbedding(128, embed_size),
-            TimeEmbedding(64, embed_size)
+            TimeEmbedding(nc_4, embed_size), ## (512, )
+            TimeEmbedding(nc_3, embed_size),
+            TimeEmbedding(nc_2, embed_size),
+            TimeEmbedding(nc_1, embed_size)
         ])
 
         self.alpha_embeddings_up = nn.ModuleList([
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=512),
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=256),
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=128),
-            PhiEmbedding(phi_dim, in_dim=100, out_dim=64)
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_4), ## (512, )
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_3),
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_2),
+            PhiEmbedding(phi_dim, in_dim=100, out_dim=nc_1)
         ])
 
-        self.outc = final_regress(64, channels)
+        self.outc = final_regress(nc_1, channels)
 
     def forward(self, x, t, phi_ps=None):
         if phi_ps is None:
@@ -670,7 +678,8 @@ class Unet1DGDiff(Module):
         x = self.bottleneck(x)
         x += self.time_embeddings[-1](t)
         x = self.att_bottleneck(x)
-
+        x = self.bottl_down(x)
+        
         # Up path
         for i, up in enumerate(self.up_blocks):
             res = residuals[-(i + 1)]
@@ -680,6 +689,7 @@ class Unet1DGDiff(Module):
 
         return self.outc(x)    
 
+    @torch.no_grad()
     def summary(self, x_shape, t_shape):
         """
         Kears-style Summary of the Unet1D model architecture.

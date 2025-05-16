@@ -16,6 +16,7 @@ def get_2d_noise(shape, phi=0, ret_psd=False, device=None):
         phi = torch.tensor(phi).to(device).repeat(shape[0], 1)
     else:
         assert phi.shape == (shape[0], 1)
+   
     N = shape[2]
 
     wn = torch.fft.fftfreq(N).reshape((N, 1)).to(device)

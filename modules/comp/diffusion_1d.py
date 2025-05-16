@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 ## Custom Modules
 from ..utils.helper import *
 from .unet import *
+from ..utils.noise_create import get_colored_noise_1d
 
 from torch.cuda.amp import autocast
 
@@ -54,7 +55,6 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         seq_length,
         timesteps = 1000,
         sampling_timesteps = None,
-        beta_schedule = 'cosine',
         ddim_sampling_eta = 0.,
         auto_normalize = True
     ):
@@ -67,13 +67,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
         self.seq_length = seq_length
 
-        if beta_schedule == 'linear':
-            betas = linear_beta_schedule(timesteps)
-        elif beta_schedule == 'cosine':
-            betas = cosine_beta_schedule(timesteps)
-        else:
-            raise ValueError(f'unknown beta schedule {beta_schedule}')
-
+        betas = linear_beta_schedule(timesteps)
         alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
@@ -137,7 +131,6 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
             extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
             extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
-
 
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
@@ -244,9 +237,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         loss_t = F.mse_loss(pred_t, target_t, reduction='none')
         loss_t = reduce(loss_t, 'b ... -> b', 'mean')
 
-        # Combine and weight
-        comp_w = 0.85
-        loss = comp_w * loss_noise + (1 - comp_w) * loss_t
+        loss = loss_noise + loss_t
 
         ## loss-weighted based on SNR at timestep t (batched/indexed at different t)
         loss = loss * extract(self.loss_weight, t, loss.shape)
@@ -262,10 +253,37 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         return self.p_losses(img, t, *args, **kwargs)
 
 #### -----------------------------------------------------------------------------------
-#### -----------------------------------------------------------------------------------
+#### ---------------------------GibbsDIFF-----------------------------------------------
 #### -----------------------------------------------------------------------------------
 
-    def get_gdiff_loss(self, ts, batch, phi_ps=None):
+class GibbsDiff1D(Module):
+    def __init__(
+        self,
+        model,
+        *,
+        seq_length,
+        num_timesteps = 1000, 
+        sampling_timesteps = None):
+
+        super().__init__()
+
+        self.model = model
+        self.device = model.device
+        self.num_timesteps = num_timesteps
+        self.seq_length = seq_length
+
+        self.beta_small = 0.1 / self.num_timesteps
+        self.beta_large = 20 / self.num_timesteps
+        self.timesteps_t = torch.arange(0, self.num_timesteps)
+        self.beta_t = self.beta_small + (self.timesteps_t / self.num_timesteps) * (self.beta_large - self.beta_small)
+        self.alpha_t = 1 - self.beta_t
+        self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0) 
+
+        if not sampling_timesteps:
+            self.sampling_timesteps = self.num_timesteps
+
+
+    def get_gdiff_loss(self, batch, ts, phi_ps=None):
         
         #phi should be a tensor of the size of the batch_size, we want a phi different for each batch element
         #if batch is a list (the case of ImageFolder for ImageNet): take the first element, otherwise take batch:
@@ -274,7 +292,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
 
         bs = batch.shape[0]
         if phi_ps is None:
-            #sample phi_ps between -1 and 1
+            #sample phi_ps between -1 and 1 | shape (batch_size, 1)
             phi_ps = torch.rand(bs, 1, device=self.device)*2 - 1
 
         #if phi is a scalar, cast to batch dimension. For training on a single phi.
@@ -284,25 +302,44 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         noise_imgs = []
 
         ### non-flat PSD colored-noise
-        epsilons = get_colored_noise_2d(batch.shape, phi_ps, device= self.device) #B x C x H x W
+        epsilons, _ = get_colored_noise_1d(batch.shape, phi_ps, device= self.device) #B x seq_dim X seq_len
+        epsilons = epsilons.view(epsilons.shape[0], 1, -1)
 
-        a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1, 1).to(self.device)
+        a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1).to(self.device)
         noise_imgs = torch.sqrt(a_hat) * batch + torch.sqrt(1 - a_hat) * epsilons ## x_t
 
-        e_hat = self.forward(noise_imgs, ts, phi_ps=phi_ps) ## since noise is parameterised by (phi)
+        print(batch.shape, epsilons.shape, noise_imgs.shape)
+
+        e_hat = self.model(noise_imgs, ts, phi_ps=phi_ps) ## since noise is parameterised by (phi)
         loss = nn.functional.mse_loss(e_hat, epsilons)
 
         return loss
 
-    def forward_gdiff(self, img, *args, **kwargs):
+    def forward(self, img, *args, **kwargs):
         
         b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
         assert n == seq_length, f'seq length must be {seq_length}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long() ### t ~ uniformly-sampled(0, num_time_steps) == batch_size
+        t = torch.randint(0, self.num_timesteps, (b, 1), device=device).long() ### t ~ uniformly-sampled(0, num_timesteps) == batch_size
 
-        img = self.normalize(img)
+        # img = self.normalize(img)
         return self.get_gdiff_loss(img, t, *args, **kwargs)
 
+    def get_closest_timestep(noise_level, ret_sigma=False):
+        """
+        Returns the closest timestep to the given noise level. If ret_sigma is True, also returns the noise level corresponding to the closest timestep.
+        """
+        alpha_bar_t = self.alpha_bar_t.to(noise_level.device)
+        all_noise_levels = torch.sqrt((1-alpha_bar_t)/alpha_bar_t).reshape(-1, 1).repeat(1, noise_level.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
+        print('Noise-Levels: ', all_noise_levels)
+        
+        closest_timestep = torch.argmin(torch.abs(all_noise_levels - noise_level), dim=0)
+        print('Closest-Timesteps: ', cloesest_timestep)
+
+        if ret_sigma:
+            return closest_timestep, all_noise_levels[closest_timestep, 0]
+        else:
+            return closest_timestep
+    
 
     @torch.no_grad()
     def denoise_1step_gdiff(self, x, t, phi_ps=None):
@@ -310,8 +347,9 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
         Denoises one step given an phi (if phi_ps=None, it is sampled uniformly in [-1,1]) and a timestep t.
         x_{t-1} = (1 / sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_bar_t)) * e_hat) + sqrt(beta_t) * z_phi
         """
+
         #phi should be a tensor of the size of the batch_size, we want a different phi for each batch element
-        if phi_ps is None:5
+        if phi_ps is None:
             # If no phi_ps is given, assume it's white noise, i.e. phi_ps = 0
             phi_ps = torch.zeros(x.shape[0],1, device=self.device).float()
         
@@ -335,18 +373,22 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
             return x
     
     @torch.no_grad()
-    def denoise_samples_batch_time(self, noisy_batch, timesteps, batch_origin=None, return_sample=False, phi_ps=None):
+    def denoise_samples_batch_time(self, noisy_batch, batch_origin=None, return_sample=False, phi_ps=None):
         """
         Denoises a batch of images for a given number of timesteps (which can be different across the batch).
         """
-        max_timesteps = torch.max(timesteps)
-        mask = torch.ones(noisy_batch.shape[0], max_timesteps+1).to(self.device)
+        
+        mask = torch.ones(noisy_batch.shape[0], self.sampling_timesteps+1).to(self.device)
+
         for i in range(noisy_batch.shape[0]):
             mask[i, timesteps[i]+1:] = 0
 
-        ## Reverse-Diffusion
-        for t in range(max_timesteps, 0, -1):
+        ## Reverse-Diffusion (T -> 0)
+        for t in range(self.sampling_timesteps, 0, -1):
             noisy_batch = self.denoise_1step(noisy_batch, torch.tensor(t).cuda(), phi_ps) * (mask[:, t]).reshape(-1,1,1,1) + noisy_batch * (1 - mask[:, t]).reshape(-1,1,1,1)
+        
+        # noisy_batch = self.unnormalize(noisy_batch)
+
         if batch_origin is None:
             return noisy_batch
         else:
@@ -354,6 +396,7 @@ class GaussianDiffusion1D(Module): ## We by-default perform the pred_noise imple
                 return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), noisy_batch
             else:
                 return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), None
+    
 
 
 

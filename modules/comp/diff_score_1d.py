@@ -136,7 +136,7 @@ class DiffScore(pl.LightningModule):
 
         bs = batch.shape[0]
         if phi_ps is None:
-            #sample phi_ps between -1 and 1
+            #sample phi_ps between -1 and 1 | shape (batch_size, 1)
             phi_ps = torch.rand(bs, 1, device=self.device)*2 - 1
 
         #if phi is a scalar, cast to batch dimension. For training on a single phi.
