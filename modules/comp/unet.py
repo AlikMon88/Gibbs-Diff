@@ -584,7 +584,7 @@ class Unet1DGDiff(Module):
         self.channels = channels
         self.self_condition = self_condition
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
+
         phi_dim = 1
 
         ## attn_dim
@@ -665,6 +665,9 @@ class Unet1DGDiff(Module):
 
         x = self.init_conv(x)
         residuals = []
+
+        ## NOTE: We are perfoming temporal embedding to the MCMC sequence of DDPM model - not on the sequential elements of each data sample - to inject t, phi info in x_t state
+        ## BUT: We perform self-attention on the sequential elements of data samples
 
         # Down path
         for i, down in enumerate(self.down_blocks):

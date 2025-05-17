@@ -75,7 +75,7 @@ class Trainer1D:
         self.train_num_steps = train_num_steps
 
         # data loader (CPU)
-        dl = DataLoader(dataset, batch_size=train_batch_size, shuffle=True, pin_memory=False, num_workers=0)
+        dl = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, pin_memory=False, num_workers=0)
         self.dl = cycle(dl)
 
         # optimizer
@@ -151,7 +151,8 @@ class Trainer1DGDiff:
         self,
         diffusion_model: nn.Module,
         dataset,
-        *,  # keyword-only separator
+        val_dataset,
+        *,  ## keyword-only separator
         train_batch_size: int = 16,
         gradient_accumulate_every: int = 1,
         train_lr: float = 1e-4,
@@ -181,9 +182,11 @@ class Trainer1DGDiff:
         self.train_num_steps = train_num_steps
 
         # data loader (CPU)
-        dl = DataLoader(dataset, batch_size=train_batch_size, shuffle=True, pin_memory=False, num_workers=0)
-        self.dl = cycle(dl)
+        dl = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, pin_memory=False, num_workers=0)
+        self.val_dl = DataLoader(val_dataset, batch_size=self.batch_size, num_workers=0)
 
+        self.dl = cycle(dl)
+    
         # optimizer
         self.opt = torch.optim.Adam(self.model.parameters(), lr=train_lr, betas=adam_betas)
 
@@ -214,20 +217,21 @@ class Trainer1DGDiff:
         self.ema.load_state_dict(data['ema'])
 
     def train(self):
+        
+        train_loss_curve, val_loss_curve = [], []
+
         for _ in tqdm(range(self.step, self.train_num_steps), desc='Optimization Steps', initial=self.step, total=self.train_num_steps):
             self.model.train()
-            total_loss = 0.0
 
-            for _ in range(self.gradient_accumulate_every):
-                
-                batch = next(self.dl)
-                batch = batch.reshape(batch.shape[0], 1, -1)
-                
-                loss = self.model(batch) / self.gradient_accumulate_every
-                loss.backward()
-                total_loss += loss.item()
+            # Get training batch and reshape
+            batch = next(self.dl)
+            batch = batch.reshape(batch.shape[0], 1, -1)
 
-            # gradient clipping and step
+            # Forward and backward pass
+            loss = self.model(batch)
+            loss.backward()
+
+            # Gradient clipping and optimizer step
             nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
             self.opt.step()
             self.opt.zero_grad()
@@ -236,7 +240,18 @@ class Trainer1DGDiff:
             self.ema.update()
             self.step += 1
 
-            # save and sample
+            train_loss_curve.append(loss.item())
+
+            # Validation
+            self.model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for val_batch in self.val_dl:
+                    val_batch = val_batch.reshape(val_batch.shape[0], 1, -1)
+                    val_loss += self.model(val_batch).item()
+            val_loss_curve.append(val_loss)
+
+            # Optional: Save and sample
             # if self.step % self.save_and_sample_every == 0:
             #     self.ema.ema_model.eval()
             #     with torch.no_grad():
@@ -247,3 +262,4 @@ class Trainer1DGDiff:
             #         self.save(self.step // self.save_and_sample_every)
 
         print('Training complete.')
+        return train_loss_curve, val_loss_curve

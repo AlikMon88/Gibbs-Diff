@@ -308,8 +308,6 @@ class GibbsDiff1D(Module):
         a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1).to(self.device)
         noise_imgs = torch.sqrt(a_hat) * batch + torch.sqrt(1 - a_hat) * epsilons ## x_t
 
-        print(batch.shape, epsilons.shape, noise_imgs.shape)
-
         e_hat = self.model(noise_imgs, ts, phi_ps=phi_ps) ## since noise is parameterised by (phi)
         loss = nn.functional.mse_loss(e_hat, epsilons)
 
@@ -319,21 +317,19 @@ class GibbsDiff1D(Module):
         
         b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
         assert n == seq_length, f'seq length must be {seq_length}'
-        t = torch.randint(0, self.num_timesteps, (b, 1), device=device).long() ### t ~ uniformly-sampled(0, num_timesteps) == batch_size
+        t = torch.randint(0, self.num_timesteps, (b, ), device=device).long() ### t ~ uniformly-sampled(0, num_timesteps) == batch_size
 
         # img = self.normalize(img)
         return self.get_gdiff_loss(img, t, *args, **kwargs)
 
-    def get_closest_timestep(noise_level, ret_sigma=False):
+    def get_closest_timestep(self, noise_level, ret_sigma=False):
         """
         Returns the closest timestep to the given noise level. If ret_sigma is True, also returns the noise level corresponding to the closest timestep.
         """
         alpha_bar_t = self.alpha_bar_t.to(noise_level.device)
         all_noise_levels = torch.sqrt((1-alpha_bar_t)/alpha_bar_t).reshape(-1, 1).repeat(1, noise_level.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
-        print('Noise-Levels: ', all_noise_levels)
         
         closest_timestep = torch.argmin(torch.abs(all_noise_levels - noise_level), dim=0)
-        print('Closest-Timesteps: ', cloesest_timestep)
 
         if ret_sigma:
             return closest_timestep, all_noise_levels[closest_timestep, 0]
@@ -362,10 +358,12 @@ class GibbsDiff1D(Module):
         
         with torch.no_grad():
             if t > 1:
-                z = get_colored_noise_2d(x.shape, phi_ps, device= self.device)
+                z, _ = get_colored_noise_1d(x.shape, phi_ps, device= self.device)
             else:
                 z = 0
-            e_hat = self.forward(x, t.view(1, 1).repeat(x.shape[0], 1), phi_ps=phi_ps)
+            
+            t_ch = t.view(1).repeat(x.shape[0],)
+            e_hat = self.model(x, t_ch, phi_ps=phi_ps)
             pre_scale = 1 / math.sqrt(self.alpha_t[t])
             e_scale = (self.beta_t[t]) / math.sqrt(1 - self.alpha_bar_t[t])
             post_sigma = math.sqrt(self.beta_t[t]) * z
@@ -373,19 +371,20 @@ class GibbsDiff1D(Module):
             return x
     
     @torch.no_grad()
-    def denoise_samples_batch_time(self, noisy_batch, batch_origin=None, return_sample=False, phi_ps=None):
+    def denoise_samples_batch_time(self, noisy_batch, timesteps, batch_origin=None, return_sample=False, phi_ps=None):
         """
         Denoises a batch of images for a given number of timesteps (which can be different across the batch).
         """
         
-        mask = torch.ones(noisy_batch.shape[0], self.sampling_timesteps+1).to(self.device)
+        max_timesteps = torch.max(timesteps)
+        mask = torch.ones(noisy_batch.shape[0], max_timesteps+1).to(self.device)
 
         for i in range(noisy_batch.shape[0]):
             mask[i, timesteps[i]+1:] = 0
 
-        ## Reverse-Diffusion (T -> 0)
-        for t in range(self.sampling_timesteps, 0, -1):
-            noisy_batch = self.denoise_1step(noisy_batch, torch.tensor(t).cuda(), phi_ps) * (mask[:, t]).reshape(-1,1,1,1) + noisy_batch * (1 - mask[:, t]).reshape(-1,1,1,1)
+        ## Reverse-Diffusion (t(x_t) -> 0) --> Denoising from t to 0 | NOT Generating
+        for t in range(max_timesteps, 0, -1):
+            noisy_batch = self.denoise_1step_gdiff(noisy_batch, torch.tensor(t), phi_ps) * (mask[:, t]).reshape(-1,1,1) + noisy_batch * (1 - mask[:, t]).reshape(-1,1,1)
         
         # noisy_batch = self.unnormalize(noisy_batch)
 
