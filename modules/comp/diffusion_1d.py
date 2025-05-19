@@ -18,6 +18,9 @@ from tqdm.auto import tqdm
 from ..utils.helper import *
 from .unet import *
 from ..utils.noise_create import get_colored_noise_1d
+from ..utils.hmc import *
+from ..utils.hmc import sample_hmc
+from ..utils.hmc import get_phi_all_bounds
 
 from torch.cuda.amp import autocast
 
@@ -336,259 +339,91 @@ class GibbsDiff1D(Module):
         else:
             return closest_timestep
     
-
-    ### Trained DDPM as the posterior sampler for x_0_hat 
-    def blind_denoising(self, y, yt,
-                            norm_phi_mode='compact',
-                            num_chains_per_sample=1,
-                            n_it_gibbs=30,
-                            n_it_burnin=10,
-                            sigma_min=0.04,
-                            sigma_max=0.3,
-                            return_chains=True):
-           
-        '''Gibbs-Diffusion: performs blind denoising with a Gibbs sampler alternating between the diffusion model step returning a sample from p(x|y,phi) and the HMC step that return estimates of parameters from p(phi|x,y).'''
-
-        num_samples = y.shape[0]
-        ps_model = iut.ColoredPS(norm_input_phi=norm_phi_mode)
-        
-        # Prior, likelihood, and posterior functions
-        sample_phi_prior = lambda n: iut.sample_prior_phi(n, norm=norm_phi_mode, device=self.device) # Sample uniformly in [-1, 1]
-        log_likelihood = lambda phi, x: iut.log_likelihood_eps_phi_sigma(phi[...,:1], phi[...,1:], x, ps_model)
-        log_prior = lambda phi: iut.log_prior_phi_sigma(phi[...,:1], phi[...,1], sigma_min, sigma_max, norm=norm_phi_mode)
-        log_posterior = lambda phi, x: log_likelihood(phi, x) + log_prior(phi) #  Log posterior (not normalized by the evidence).
-
-        # Bounds and collision management
-        phi_min_norm, phi_max_norm = iut.get_phi_bounds(device=self.device) #change to work in [-1,1]
-        phi_min_norm, phi_max_norm = iut.normalize_phi(phi_min_norm, mode=norm_phi_mode), iut.normalize_phi(phi_max_norm, mode=norm_phi_mode) #change to work in [-1,1]
-        sigma_min_tensor = torch.tensor([sigma_min]).to(self.device)
-        sigma_max_tensor = torch.tensor([sigma_max]).to(self.device)
-        phi_min_norm = torch.concatenate((phi_min_norm, sigma_min_tensor)) # Add sigma_min to the list of parameter bounds
-        phi_max_norm = torch.concatenate((phi_max_norm, sigma_max_tensor)) # Add sigma_max to the list of parameter bounds
-
-        def collision_manager(q, p, p_nxt):
-            p_ret = p_nxt
-            for i in range(2):
-                crossed_min_boundary = q[..., i] < phi_min_norm[i]
-                crossed_max_boundary = q[..., i] > phi_max_norm[i]
-                # Reflecting boundary conditions
-                p_ret[..., i][crossed_min_boundary] = -p[..., i][crossed_min_boundary]
-                p_ret[..., i][crossed_max_boundary] = -p[..., i][crossed_max_boundary]
-            return p_ret
-
-        #print("Normalized prior bounds are:", phi_min_norm, phi_max_norm)
-
-        # Inference on the noise level \sigma and the parameters \varphi of the covariance of the noise
-
-        # Repeat the data for each chain
-        y_batch = y.repeat(num_chains_per_sample, 1, 1, 1)
-        yt_batch = yt.repeat(num_chains_per_sample, 1, 1, 1)
-
-        # Initalization
-        phi_0 = sample_phi_prior(num_samples*num_chains_per_sample)
-        sigma_0 = iut.get_noise_level_estimate(y_batch, sigma_min, sigma_max).unsqueeze(-1) # sigma_0 is initalized with a rough estimate of the noise level
-        phi_0 = torch.concatenate((phi_0, sigma_0), dim=-1) # Concatenate phi and sigma
-
-        # Gibbs sampling
-        phi_all, x_all = [], []
-        phi_all.append(phi_0)
-        phi_k = phi_0
-        step_size, inv_mass_matrix = None, None
-
-        for n in tqdm(range(n_it_gibbs + n_it_burnin)):
-
-            # Diffusion step
-            timesteps = self.get_closest_timestep(phi_k[:, 1])
-            x_k = self.denoise_samples_batch_time(yt_batch, timesteps, phi_ps=iut.unnormalize_phi(phi_k[:, :1], mode=norm_phi_mode))
-            eps_k = (y_batch - x_k)
-            
-            # HMC step
-            log_prob = lambda phi: log_posterior(phi, eps_k)
-            def log_prob_grad(phi):
-                """ Compute the log posterior and its gradient."""
-                phib = phi.clone()
-                phib.requires_grad_(True)
-                log_prob_val = log_posterior(phib, eps_k)
-                grad_log_prob = torch.autograd.grad(log_prob_val, phib, grad_outputs=torch.ones_like(log_prob_val))[0]
-                return log_prob_val.detach(), grad_log_prob
-            
-            if n == 0:
-                hmc = HMC(log_prob, log_prob_and_grad=log_prob_grad)
-                hmc.set_collision_fn(collision_manager)
-
-                phi_k = hmc.sample(phi_k, nsamples=1, burnin=10, step_size=1e-6, nleap=(5, 15), epsadapt=300, verbose=False, ret_side_quantities=False)[:, 0, :].detach()
-                step_size = hmc.step_size
-                inv_mass_matrix = hmc.mass_matrix_inv
-                
-            else:
-                hmc = HMC(log_prob, log_prob_and_grad=log_prob_grad)
-                hmc.set_collision_fn(collision_manager)
-                hmc.set_inv_mass_matrix(inv_mass_matrix, batch_dim=True)
-                phi_k = hmc.sample(phi_k, nsamples=1, burnin=10, step_size=step_size, nleap=(5, 15), epsadapt=0, verbose=False)[:, 0, :].detach()
-
-            # Save samples
-            phi_all.append(phi_k)
-            x_all.append(x_k.detach().cpu())
-
-        phi_all = torch.stack(phi_all, dim=1)
-        x_all = torch.stack(x_all, dim=1)
-        if return_chains:
-            return phi_all, x_all
-        else:
-            x_all
-
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler_np(self, y, yt, num_chains_per_sample, n_it_gibbs, n_it_burnin, sigma_min = 0.04, sigma_max = 0.4, return_chains=True):
+    @torch.no_grad()
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=50, n_it_burnin=10, sigma_min=0.04, sigma_max=0.4, return_chains=False):
 
-        ## we are switching to [0, 1] bound for  
+        device = self.model.device
 
         phi_max = 1.0
         phi_min = -phi_max
 
         batch_size = y.shape[0]
         chains = num_chains_per_sample
+        total_chains = batch_size * chains
 
         # Repeat inputs for each chain
-        y = np.repeat(y, chains, axis=0)
-        yt = np.repeat(yt, chains, axis=0)
+        y = y.repeat_interleave(chains, dim=0)     # (B * C, ...)
+        yt = yt.repeat_interleave(chains, dim=0)   # (B * C, ...)
+        print(y.shape, yt.shape)
 
-        # Initialize phi/sigma | phi_all contains phi and sigma concatenated 
-        phi_init = (torch.rand(batch_size * chains) * (phi_max - phi_min) + phi_min).cpu().numpy() # initial phi, shape (batch * chains, 1) ~ uniform(-1, 1)
-        sigma_init = get_noise_estimate(y.reshape(batch_size * chains, -1), sigma_min, sigma_max).cpu().numpy()
-        phi_init_all = np.concatenate([phi_init, sigma_init], axis=1)  # shape (batch * chains, 2)
-        phi_all = [phi_init]
-        
-        phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device=self.model.device)
-        
+        # Initialize phi and sigma
+        phi_init = (torch.rand(total_chains, device=device) * (phi_max - phi_min) + phi_min).unsqueeze(1)  # (B*C, 1)
+        sigma_init = get_noise_estimate(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)        # (B*C, 1)
+
+        phi_init_all = torch.cat([phi_init, sigma_init], dim=1)  # (B*C, 2)
+        phi_all = [phi_init_all]
+
+        phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device)
+
         x_all = []
-
         step_size = None
         inv_mass_matrix = None
 
         for i in range(n_it_gibbs + n_it_burnin):
 
-            phi = phi_all[-1] ## state-change
+            phi = phi_all[-1]  # (B*C, 2)
 
             # Step 1: DDOM Posterior Sampling
-            t = self.get_closest_timesteps(phi[:, 1])  # noise level (sigma)
-            x = self.denoise_samples_batch_time(yt_batch, t, phi_ps=phi[:, :1]).cpu().numpy()
-            print(x.shape, t.shape)
-
+            t = self.get_closest_timestep(phi[:, 1])  # sigma values
+            x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
             epsilon = y - x
 
-            # Step 2: HMC sampling
+            # Step 2: HMC Sampling
             def log_posterior(phi_):
-                return log_likelihood(phi_, epsilon) + log_prior(phi_)
+                phi_ = phi_.clone().detach().requires_grad_(True)
+                return log_likelihood_eps_phi_sigma(phi_, epsilon) + log_prior_phi_sigma(phi_)
+
+            # print('phi - epsilon')
+            # print(phi.shape, epsilon.shape)
 
             if i == 0:
-                # First iteration with adaptation | deal boundary_reflection in sample_hmc()
-                phi_new, step_size, inv_mass_matrix = sample_hmc(log_posterior, phi, step_size = 0.1, inv_mass_matrix, adapt=True)
-
+                phi_new, step_size, inv_mass_matrix = sample_hmc(
+                    log_prob_fn=log_posterior,
+                    phi_init=phi,
+                    adapt=True
+                )
             else:
-                # No adaptation
-                phi_new = sample_hmc(log_posterior, phi, step_size, inv_mass_matrix, adapt=False)
+                phi_new = sample_hmc(
+                    log_prob_fn=log_posterior,
+                    phi_init=phi,
+                    step_size=step_size,
+                    inv_mass_matrix=inv_mass_matrix,
+                    adapt=False
+                )
 
             phi_all.append(phi_new)
             x_all.append(x)
 
         if return_chains:
-            return np.stack(phi_all, axis=1), np.stack(x_all, axis=1)  # (batch*chains, steps, ...)
+            return torch.stack(phi_all, dim=1), torch.stack(x_all, dim=1)  # (B*C, steps, ...)
         else:
-            return phi_all, x_all
+            return phi_all[-1], x_all[-1]
 
 
-    def run_gibbs_sampler_torch(self, y, yt, num_chains_per_sample, n_it_gibbs, n_it_burnin, sigma_min = 0.04, sigma_max = 0.4, return_chains=True):
-        
-            ## we are switching to [0, 1] bound for  
-
-            phi_max = 1.0
-            phi_min = -phi_max
-
-            batch_size = y.shape[0]
-            chains = num_chains_per_sample
-
-            # Repeat inputs for each chain
-            y = np.repeat(y, chains, axis=0)
-            yt = np.repeat(yt, chains, axis=0)
-
-            # Initialize phi/sigma | phi_all contains phi and sigma concatenated 
-            phi_init = (torch.rand(batch_size * chains) * (phi_max - phi_min) + phi_min).cpu().numpy() # initial phi, shape (batch * chains, 1) ~ uniform(-1, 1)
-            sigma_init = get_noise_estimate(y.reshape(batch_size * chains, -1), sigma_min, sigma_max).cpu().numpy()
-            phi_init_all = np.concatenate([phi_init, sigma_init], axis=1)  # shape (batch * chains, 2)
-            phi_all = [phi_init]
-            
-            phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device=self.model.device)
-            
-            x_all = []
-
-            step_size = None
-            inv_mass_matrix = None
-
-            for i in range(n_it_gibbs + n_it_burnin):
-
-                phi = phi_all[-1] ## state-change
-
-                # Step 1: DDOM Posterior Sampling
-                t = self.get_closest_timesteps(phi[:, 1])  # noise level (sigma)
-                x = self.denoise_samples_batch_time(yt_batch, t, phi_ps=phi[:, :1])
-                print(x.shape, t.shape)
-
-                epsilon = y - x
-
-                # Step 2: HMC sampling
-                def log_posterior(phi_):
-                    return log_likelihood(phi_, epsilon) + log_prior(phi_)
-
-            if i == 0:
-                    hmc = HMC(log_prob, log_prob_and_grad=log_prob_grad)
-                    hmc.set_collision_fn(collision_manager)
-
-                    phi_k = hmc.sample(phi_k, nsamples=1, burnin=10, step_size=1e-6, nleap=(5, 15), epsadapt=300, verbose=False, ret_side_quantities=False)[:, 0, :].detach()
-                    step_size = hmc.step_size
-                    inv_mass_matrix = hmc.mass_matrix_inv
-                    
-                else:
-                    hmc = HMC(log_prob, log_prob_and_grad=log_prob_grad)
-                    hmc.set_collision_fn(collision_manager)
-                    hmc.set_inv_mass_matrix(inv_mass_matrix, batch_dim=True)
-                    phi_k = hmc.sample(phi_k, nsamples=1, burnin=10, step_size=step_size, nleap=(5, 15), epsadapt=0, verbose=False)[:, 0, :].detach()
-
-
-                phi_all.append(phi_new)
-                x_all.append(x)
-
-            phi_all = torch.stack(phi_all, dim=1)
-            x_all = torch.stack(x_all, dim=1)
-
-            if return_chains:
-                return phi_all, x_all  # (batch*chains, steps, ...)
-            else:
-                return x_all
-
-    
-    def blind_denoising_pmean(self,y, yt,
-                        norm_phi_mode='compact',
-                        num_chains_per_sample=5,
-                        n_it_gibbs=30,
-                        n_it_burnin=10, 
-                        avg_pmean=10, ## last avg_pmean positions
-                        return_chains=True):
+    @torch.no_grad()    
+    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=30, n_it_burnin=10, avg_pmean=10): ## last avg_pmean positions
         
         '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
 
-        if return_chains:
-            phi_all, x_all = self.blind_denoising(y, yt, norm_phi_mode=norm_phi_mode, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=return_chains)
-        else:
-            x_all = self.blind_denoising(y, yt, norm_phi_mode=norm_phi_mode, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=return_chains)
+        phi_all, x_all = self.sample_hmc(y, yt, norm_phi_mode=norm_phi_mode, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True)
+        # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
+        # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
+        x_denoised_pmean = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_mean, self.channels, self.seq_len).mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
         
-        x_denoised_pmean = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_mean, self.channels, self.seq_len).mean(dim=(0, 2))
+        return phi_all, x_denoised_pmean
         
-        if return_chains:
-            return phi_all, x_denoised_pmean
-        else:
-            return x_denoised_pmean
-
 
     @torch.no_grad()
     def denoise_1step_gdiff(self, x, t, phi_ps=None):
