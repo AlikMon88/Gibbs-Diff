@@ -52,13 +52,14 @@ def log_prior_phi(phi, norm_mode):
     else:
         return -torch.log(torch.tensor(phi_max - phi_min))
 
-def log_prior_phi_sigma(phi_all, norm_mode="compact"):
+def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ return 0
 
-    phi, sigma = phi_all[:, 0], phi_all[:, 1]
     prior_phi = log_prior_phi(phi, norm_mode)
     valid_sigma = (sigma >= sigma_min) & (sigma <= sigma_max)
     prior_sigma = torch.where(valid_sigma, torch.zeros_like(sigma), torch.full_like(sigma, -float('inf')))
-    return prior_phi + prior_sigma
+    ret = prior_phi + prior_sigma
+    print('ret-prior: ', ret)
+    return ret
 
 class ColoredPowerSpectrum1D:
     def __init__(self, seq_len=100, device='cpu'):
@@ -79,12 +80,9 @@ class ColoredPowerSpectrum1D:
         S = S / S.mean(dim=1, keepdim=True)
         return S
 
-def log_likelihood_eps_phi(phi_all, eps):
+### All these prior and Log-likelihood functions are returning nan
+def log_likelihood_eps_phi(phi, eps, ps_model):
 
-    phi = phi_all[:, 0]
-    sigma = phi_all[:, 1]
-
-    ps_model = ColoredPowerSpectrum1D(seq_len=eps.shape[-1], device=eps.device)
     S = ps_model.forward(phi)  # (batch_size, seq_len)
 
     eps = eps.view(eps.size(0), -1)
@@ -95,12 +93,8 @@ def log_likelihood_eps_phi(phi_all, eps):
     log_det = torch.log(S + sigma_eps).sum(dim=1)
     return -0.5 * (log_det + term.sum(dim=1))
 
-def log_likelihood_eps_phi_sigma(phi_all, eps):
+def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
 
-    phi = phi_all[:, 0]
-    sigma = phi_all[:, 1]
-
-    ps_model = ColoredPowerSpectrum1D(seq_len=eps.shape[-1], device=eps.device)
     S = ps_model.forward(phi)
     S_scaled = (sigma ** 2).unsqueeze(1) * S
 
@@ -110,7 +104,9 @@ def log_likelihood_eps_phi_sigma(phi_all, eps):
 
     term = xf2 / (S_scaled + sigma_eps)
     log_det = torch.log(S_scaled + sigma_eps).sum(dim=1)
-    return -0.5 * (log_det + term.sum(dim=1))
+    ret = -0.5 * (log_det + term.sum(dim=1))
+    print('Ret-log-lik: ', ret)
+    return ret
 
 
 #### -------------------------------------------------------------
@@ -139,15 +135,17 @@ def hamiltonian(q, p, log_prob_fn, inv_mass_matrix):
     return -log_prob_fn(q) + kinetic_energy(p, inv_mass_matrix)
 
 def gradient_log_prob(log_prob_fn, q):
-    q = q.clone().detach().requires_grad_(True)
-    logp = log_prob_fn(q)
-    grad_q = torch.autograd.grad(logp.sum(), q)[0]
+    q_clone = q.clone().requires_grad_(True)
+    logp = log_prob_fn(q_clone)
+    print(type(logp), logp.shape)
+    grad_q = torch.autograd.grad(logp, q_clone, grad_outputs=torch.ones_like(logp))[0]
     return grad_q
 
-def leapfrog(q, p, step_size, n_steps, log_prob_fn, inv_mass_matrix):
+def leapfrog(q, p, step_size, n_steps, log_prob_fn, log_grad, inv_mass_matrix):
     q = q.clone()
     p = p.clone()
-    p -= 0.5 * step_size * gradient_log_prob(log_prob_fn, q)
+
+    p -= 0.5 * step_size * log_grad(q)
 
     for _ in range(n_steps):
         q += step_size * (p @ inv_mass_matrix)
@@ -180,7 +178,7 @@ class DualAveragingStepSize:
         self.step_bar = np.exp((self.t ** -self.kappa) * log_step + (1 - self.t ** -self.kappa) * np.log(self.step_bar or np.exp(log_step)))
         return np.exp(log_step)
 
-def sample_hmc(log_prob_fn, phi_init, step_size=0.1, n_leapfrog_steps=50, chain_length=50, burnin_steps=10, inv_mass_matrix=None, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
+def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=50, chain_length=50, burnin_steps=10, inv_mass_matrix=None, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
     
     q = phi_init.clone()
     samples = []
@@ -195,7 +193,7 @@ def sample_hmc(log_prob_fn, phi_init, step_size=0.1, n_leapfrog_steps=50, chain_
 
     for i in range(1, chain_length + burnin_steps + 1):
         p = torch.randn_like(q)
-        q_new, p_new = leapfrog(q, p, step_size, n_leapfrog_steps, log_prob_fn, inv_mass_matrix)
+        q_new, p_new = leapfrog(q, p, step_size, n_leapfrog_steps, log_prob_fn, log_grad, inv_mass_matrix)
 
         if phi_min_norm is not None and phi_max_norm is not None:
             p_new = reflect_boundary(q, p, p_new, phi_min_norm, phi_max_norm)

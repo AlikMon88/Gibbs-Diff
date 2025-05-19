@@ -345,6 +345,7 @@ class GibbsDiff1D(Module):
     def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=50, n_it_burnin=10, sigma_min=0.04, sigma_max=0.4, return_chains=False):
 
         device = self.model.device
+        ps_model = ColoredPowerSpectrum1D(device=device)
 
         phi_max = 1.0
         phi_min = -phi_max
@@ -371,6 +372,12 @@ class GibbsDiff1D(Module):
         step_size = None
         inv_mass_matrix = None
 
+        ##pre-filling
+        ## prior(phi)
+        log_prior = lambda phi: log_prior_phi_sigma(phi[:, 0], phi[:, 1])
+        ## log-likelihood(eps|phi) 
+        log_likelihood = lambda phi, eps: log_likelihood_eps_phi_sigma(phi[:, 0], phi[:, 1], eps, ps_model)
+
         for i in range(n_it_gibbs + n_it_burnin):
 
             phi = phi_all[-1]  # (B*C, 2)
@@ -378,30 +385,29 @@ class GibbsDiff1D(Module):
             # Step 1: DDOM Posterior Sampling
             t = self.get_closest_timestep(phi[:, 1])  # sigma values
             x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
-            epsilon = y - x
+            epsilon = (y - x)
 
             # Step 2: HMC Sampling
-            def log_posterior(phi_):
-                phi_ = phi_.clone().detach().requires_grad_(True)
-                return log_likelihood_eps_phi_sigma(phi_, epsilon) + log_prior_phi_sigma(phi_)
+            def log_posterior(phi, epsilon):
+                return log_likelihood(phi, epsilon) + log_prior(phi)
 
-            # print('phi - epsilon')
-            # print(phi.shape, epsilon.shape)
+            ## pre-filling
+            log_prob_fn = lambda phi: log_posterior(phi, epsilon)
+
+            def gradient_log_prob(phi):
+
+                phi_clone = phi.clone().detach().requires_grad_(True)
+                logp = log_posterior(phi_clone, epsilon)
+                print('logp:')
+                print(type(logp), logp.shape, logp)
+                print('logp.requires_grad:', logp.requires_grad)
+                print('logp.grad_fn:', logp.grad_fn)
+                grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
 
             if i == 0:
-                phi_new, step_size, inv_mass_matrix = sample_hmc(
-                    log_prob_fn=log_posterior,
-                    phi_init=phi,
-                    adapt=True
-                )
+                phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
             else:
-                phi_new = sample_hmc(
-                    log_prob_fn=log_posterior,
-                    phi_init=phi,
-                    step_size=step_size,
-                    inv_mass_matrix=inv_mass_matrix,
-                    adapt=False
-                )
+                phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
 
             phi_all.append(phi_new)
             x_all.append(x)
