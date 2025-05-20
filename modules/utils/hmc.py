@@ -3,10 +3,11 @@ import numpy as np
 import math
 import torch
 from autograd import grad
+import torch.nn as nn
 
 sigma_min, sigma_max = 0.04, 0.4
 
-def get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device):
+def get_phi_all_bounds(phi_min=-1.0, phi_max = 1.0, sigma_min = 0.04, sigma_max = 0.4, device = 'cpu'):
     phi_min = torch.tensor([phi_min], device=device)
     phi_max = torch.tensor([phi_max], device=device)
     sigma_min = torch.tensor([sigma_min], device=device)
@@ -22,47 +23,104 @@ def get_noise_estimate(y, sigma_min, sigma_max):
     sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
     return sigma_est.unsqueeze(0)
 
+## standardize = [-1, 1] -> [0, 1]
 def normalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
-    if mode == "compact":
-        return (phi - phi_min) / (phi_max - phi_min)
-    elif mode == "inf":
-        compact = (phi - phi_min) / (phi_max - phi_min)
-        return torch.tan((compact - 0.5) * torch.pi)
-    else:
-        return phi
 
+    ret = (phi - phi_min) / (phi_max - phi_min)
+    return ret
+
+    # if mode == "compact":
+    #     return (phi - phi_min) / (phi_max - phi_min)
+    # elif mode == "inf":
+    #     compact = (phi - phi_min) / (phi_max - phi_min)
+    #     return torch.tan((compact - 0.5) * torch.pi)
+    # else:
+    #     return phi
+
+## de-standardize = [0, 1] -> [-1, 1]
 def unnormalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
-    if mode == "compact":
-        return phi * (phi_max - phi_min) + phi_min
-    elif mode == "inf":
-        compact = torch.atan(phi) / torch.pi + 0.5
-        return compact * (phi_max - phi_min) + phi_min
-    else:
-        return phi
 
-def sample_phi_prior(n, norm_mode):
+    ret = phi * (phi_max - phi_min) + phi_min
+    return ret
+
+    # if mode == "compact":
+    #     return phi * (phi_max - phi_min) + phi_min
+    # elif mode == "inf":
+    #     compact = torch.atan(phi) / torch.pi + 0.5
+    #     return compact * (phi_max - phi_min) + phi_min
+    # else:
+    #     return phi
+
+def sample_phi_prior(n, norm_mode='compact'):
+
     phi = torch.rand(n) * (phi_max - phi_min) + phi_min
     return normalize_phi(phi, norm_mode)
 
 def log_prior_phi(phi, norm_mode):
-    if norm_mode == "compact":
-        return torch.where((phi >= 0) & (phi <= 1), torch.zeros_like(phi), torch.full_like(phi, -float('inf')))
-    elif norm_mode == "inf":
-        return -torch.log1p(phi ** 2)
-    else:
-        return -torch.log(torch.tensor(phi_max - phi_min))
 
-def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ return 0
+    logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
+    for i in range(1, phi.shape[-1]):
+        logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
+    
+    return logp
 
-    prior_phi = log_prior_phi(phi, norm_mode)
-    valid_sigma = (sigma >= sigma_min) & (sigma <= sigma_max)
-    prior_sigma = torch.where(valid_sigma, torch.zeros_like(sigma), torch.full_like(sigma, -float('inf')))
-    ret = prior_phi + prior_sigma
-    print('ret-prior: ', ret)
-    return ret
+    # if norm_mode == "compact":
+    #     return torch.where((phi >= 0) & (phi <= 1), torch.zeros_like(phi), torch.full_like(phi, -float('inf')))
+    # elif norm_mode == "inf":
+    #     return -torch.log1p(phi ** 2)
+    # else:
+    #     return -torch.log(torch.tensor(phi_max - phi_min))
 
-class ColoredPowerSpectrum1D:
+def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
+    
+    logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
+    for i in range(1, phi.shape[-1]):
+        logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
+
+    logp += torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float())
+
+    return logp
+
+    # prior_phi = log_prior_phi(phi, norm_mode)
+    # valid_sigma = (sigma >= sigma_min) & (sigma <= sigma_max)
+    # prior_sigma = torch.where(valid_sigma, torch.zeros_like(sigma), torch.full_like(sigma, -float('inf')))
+    # ret = prior_phi + prior_sigma
+    # print('ret-prior: ', ret)
+    # return ret
+
+### All these prior and Log-likelihood functions are returning nan
+def log_likelihood_eps_phi(phi, eps, ps_model):
+
+    eps_dim = eps.shape[-1]  # N
+    ps = ps_model(phi)       # Should return same shape as eps
+
+    xf = torch.fft.fft(eps)
+    term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+    term_logdet = -0.5 * torch.sum(torch.log(ps), dim=-1)
+    term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / ps, dim=-1) / eps_dim
+
+    return term_pi + term_logdet + term_x
+
+def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
+    
+    eps_dim = eps.shape[-1]
+    ps = ps_model(phi)  # Same shape as eps
+    sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # broadcast
+
+    xf = torch.fft.fft(eps)
+    scaled_ps = sigma**2 * ps
+
+    term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+    term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=-1)
+    term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / scaled_ps, dim=-1) / eps_dim
+
+    return term_pi + term_logdet + term_x
+
+class ColoredPowerSpectrum1D(torch.nn.Module):
+
     def __init__(self, seq_len=100, device='cpu'):
+        super().__init__()
+        
         k = torch.fft.fftfreq(seq_len, d=1.0).to(device)
         k[0] = sigma_eps  # avoid divide by zero
         self.k = k
@@ -79,34 +137,6 @@ class ColoredPowerSpectrum1D:
         S = k ** phi.unsqueeze(1)
         S = S / S.mean(dim=1, keepdim=True)
         return S
-
-### All these prior and Log-likelihood functions are returning nan
-def log_likelihood_eps_phi(phi, eps, ps_model):
-
-    S = ps_model.forward(phi)  # (batch_size, seq_len)
-
-    eps = eps.view(eps.size(0), -1)
-    xf = torch.fft.fft(eps)
-    xf2 = xf.real ** 2 + xf.imag ** 2
-
-    term = xf2 / (S + sigma_eps)
-    log_det = torch.log(S + sigma_eps).sum(dim=1)
-    return -0.5 * (log_det + term.sum(dim=1))
-
-def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
-
-    S = ps_model.forward(phi)
-    S_scaled = (sigma ** 2).unsqueeze(1) * S
-
-    eps = eps.view(eps.size(0), -1)
-    xf = torch.fft.fft(eps)
-    xf2 = xf.real ** 2 + xf.imag ** 2
-
-    term = xf2 / (S_scaled + sigma_eps)
-    log_det = torch.log(S_scaled + sigma_eps).sum(dim=1)
-    ret = -0.5 * (log_det + term.sum(dim=1))
-    print('Ret-log-lik: ', ret)
-    return ret
 
 
 #### -------------------------------------------------------------
