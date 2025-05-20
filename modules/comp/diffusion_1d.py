@@ -341,8 +341,7 @@ class GibbsDiff1D(Module):
     
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    @torch.no_grad()
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=50, n_it_burnin=10, sigma_min=0.04, sigma_max=0.4, return_chains=False):
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False):
 
         device = self.model.device
         ps_model = ColoredPowerSpectrum1D(device=device)
@@ -357,13 +356,14 @@ class GibbsDiff1D(Module):
         # Repeat inputs for each chain
         y = y.repeat_interleave(chains, dim=0)     # (B * C, ...)
         yt = yt.repeat_interleave(chains, dim=0)   # (B * C, ...)
-        print(y.shape, yt.shape)
+        # print(y.shape, yt.shape)
 
         # Initialize phi and sigma
-        phi_init = (torch.rand(total_chains, device=device) * (phi_max - phi_min) + phi_min).unsqueeze(1)  # (B*C, 1)
-        sigma_init = get_noise_estimate(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)        # (B*C, 1)
-
+        phi_init = sample_phi_prior(total_chains).unsqueeze(1)  # (B*C, 1)
+        sigma_init = get_noise_estimate(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)  # (B*C, 1)
+    
         phi_init_all = torch.cat([phi_init, sigma_init], dim=1)  # (B*C, 2)
+        # print('phi_init: ', phi_init_all, phi_init_all.shape)
         phi_all = [phi_init_all]
 
         phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device)
@@ -382,10 +382,17 @@ class GibbsDiff1D(Module):
 
             phi = phi_all[-1]  # (B*C, 2)
 
+            # print()
+            # print('UPDATED-PHI: ', phi)
+            # print(phi.shape)
+            # print()
+
             # Step 1: DDOM Posterior Sampling
             t = self.get_closest_timestep(phi[:, 1])  # sigma values
             x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
             epsilon = (y - x)
+            # print('epsilon:')
+            # print(torch.mean(epsilon, dim=-1))
 
             # Step 2: HMC Sampling
             def log_posterior(phi, epsilon):
@@ -396,13 +403,14 @@ class GibbsDiff1D(Module):
 
             def gradient_log_prob(phi):
 
-                phi_clone = phi.clone().detach().requires_grad_(True)
+                phi_clone = phi.clone().requires_grad_(True)
                 logp = log_posterior(phi_clone, epsilon)
-                print('logp:')
-                print(type(logp), logp.shape, logp)
-                print('logp.requires_grad:', logp.requires_grad)
-                print('logp.grad_fn:', logp.grad_fn)
+                # print('logp:')
+                # print(type(logp), logp.shape, logp)
+                # print('logp.requires_grad:', logp.requires_grad)
+                # print('logp.grad_fn:', logp.grad_fn)
                 grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
+                return grad_phi
 
             if i == 0:
                 phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
@@ -413,17 +421,18 @@ class GibbsDiff1D(Module):
             x_all.append(x)
 
         if return_chains:
-            return torch.stack(phi_all, dim=1), torch.stack(x_all, dim=1)  # (B*C, steps, ...)
+            ## returns the entire gibbs chain
+            return torch.stack(phi_all, dim=1).detach().cpu(), torch.stack(x_all, dim=1).detach().cpu()  # (B*C, steps, ...)
         else:
-            return phi_all[-1], x_all[-1]
+            ## returns the last gibbs state
+            return phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
 
-
-    @torch.no_grad()    
-    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=30, n_it_burnin=10, avg_pmean=10): ## last avg_pmean positions
+    ## there are 2 MCMC (HMC and Gibbs) chains we talk about the gibbs chain ofc 
+    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2): ## last avg_pmean positions
         
         '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
 
-        phi_all, x_all = self.sample_hmc(y, yt, norm_phi_mode=norm_phi_mode, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True)
+        phi_all, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True)
         # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
         # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
         x_denoised_pmean = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_mean, self.channels, self.seq_len).mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 

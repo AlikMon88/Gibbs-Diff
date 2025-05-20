@@ -51,10 +51,10 @@ def unnormalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
     # else:
     #     return phi
 
-def sample_phi_prior(n, norm_mode='compact'):
+def sample_phi_prior(n, phi_min=-1.0, phi_max=1.0, norm_mode='compact'):
 
     phi = torch.rand(n) * (phi_max - phi_min) + phi_min
-    return normalize_phi(phi, norm_mode)
+    return normalize_phi(phi)
 
 def log_prior_phi(phi, norm_mode):
 
@@ -77,8 +77,12 @@ def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
     for i in range(1, phi.shape[-1]):
         logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
 
-    logp += torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float())
+    sigma_ = torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float())
+    logp = logp.reshape(sigma_.shape)
+    # print(logp, sigma_, logp.shape, sigma_.shape)
+    logp += sigma_
 
+    # print('log-prior: ', logp)
     return logp
 
     # prior_phi = log_prior_phi(phi, norm_mode)
@@ -99,7 +103,8 @@ def log_likelihood_eps_phi(phi, eps, ps_model):
     term_logdet = -0.5 * torch.sum(torch.log(ps), dim=-1)
     term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / ps, dim=-1) / eps_dim
 
-    return term_pi + term_logdet + term_x
+    ret = term_pi + term_logdet + term_x
+    return ret
 
 def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
     
@@ -113,31 +118,67 @@ def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
     term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
     term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=-1)
     term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / scaled_ps, dim=-1) / eps_dim
+    
+    ret = term_pi + term_logdet + term_x
+    
+    # print('log-likelihood: ', ret)
+    # print(term_pi, term_logdet, term_x)
+    return ret
 
-    return term_pi + term_logdet + term_x
+# class ColoredPowerSpectrum1D(nn.Module):
 
-class ColoredPowerSpectrum1D(torch.nn.Module):
+#     def __init__(self, seq_len=100, device='cpu'):
+#         super().__init__()
 
-    def __init__(self, seq_len=100, device='cpu'):
+#         k = torch.fft.fftfreq(seq_len, d=1.0).to(device)
+#         k[0] = sigma_eps  # avoid divide by zero
+#         self.k = k
+#         self.device = device
+
+#     def forward(self, phi):
+#         phi = unnormalize_phi(phi, mode="compact" if phi.ndim == 1 else "inf")
+
+#         if phi.ndim == 0:
+#             phi = phi.reshape(1)
+
+#         batch_size = phi.shape[0]
+#         k = self.k.unsqueeze(0).expand(batch_size, -1)
+#         S = k ** phi.unsqueeze(1)
+#         S = S / S.mean(dim=1, keepdim=True)
+#         return S
+
+class ColoredPowerSpectrum1D(nn.Module):
+    def __init__(self, norm_input_phi='compact', shape=(1, 100), device='cpu'):
         super().__init__()
+        shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape,)
+        assert len(shape) == 2  # (dim, seq_len)
         
-        k = torch.fft.fftfreq(seq_len, d=1.0).to(device)
-        k[0] = sigma_eps  # avoid divide by zero
-        self.k = k
-        self.device = device
+        dim, N = shape
+        self.norm_input_phi = norm_input_phi
+
+        # Create isotropic wavenumber vector for 1D
+        wn = torch.fft.fftfreq(N).to(torch.float32)  # shape: (N,)
+        wn = wn.to(device)
+
+        # Compute wavenumber magnitude (squared)
+        S = wn.pow(2).reshape(1, 1, N)  # (1, 1, N)
+        S = torch.sqrt(S)
+        S[:, :, 0] = sigma_eps  # avoid division by zero for k=0
+
+        self.S = S  # shape: (1, 1, N)
 
     def forward(self, phi):
-        phi = unnormalize_phi(phi, mode="compact" if phi.ndim == 1 else "inf")
+        '''
+        phi: tensor of shape (batch_size, dim) or (batch_size, 1)
+             controls the spectral slope alpha
+        '''
+        phi = unnormalize_phi(phi, mode=self.norm_input_phi)
 
-        if phi.ndim == 0:
-            phi = phi.reshape(1)
-
-        batch_size = phi.shape[0]
-        k = self.k.unsqueeze(0).expand(batch_size, -1)
-        S = k ** phi.unsqueeze(1)
-        S = S / S.mean(dim=1, keepdim=True)
+        batch_size, dim = phi.shape[0], self.S.shape[1]
+        S = self.S.repeat(batch_size, dim, 1)  # shape: (batch_size, dim, N)
+        S = S ** phi.reshape(-1, 1, 1)         # shape: (batch_size, dim, N)
+        S = S / S.mean(dim=1, keepdim=True)    # Normalize spectrum
         return S
-
 
 #### -------------------------------------------------------------
 #### ------------------------- HMC (Utils) -----------------------
@@ -164,27 +205,25 @@ def kinetic_energy(p, inv_mass_matrix):
 def hamiltonian(q, p, log_prob_fn, inv_mass_matrix):
     return -log_prob_fn(q) + kinetic_energy(p, inv_mass_matrix)
 
-def gradient_log_prob(log_prob_fn, q):
-    q_clone = q.clone().requires_grad_(True)
-    logp = log_prob_fn(q_clone)
-    print(type(logp), logp.shape)
-    grad_q = torch.autograd.grad(logp, q_clone, grad_outputs=torch.ones_like(logp))[0]
-    return grad_q
-
 def leapfrog(q, p, step_size, n_steps, log_prob_fn, log_grad, inv_mass_matrix):
+    
     q = q.clone()
     p = p.clone()
 
-    p -= 0.5 * step_size * log_grad(q)
+    grad_ = log_grad(q)
+    # print('leap-frog-grad: ', p, q, grad_)
+    p -= 0.5 * step_size * grad_
+    # print('p_ini: ', p)
 
     for _ in range(n_steps):
         q += step_size * (p @ inv_mass_matrix)
-        grad = gradient_log_prob(log_prob_fn, q)
+        grad = log_grad(q)
         p -= step_size * grad
 
-    p -= 0.5 * step_size * gradient_log_prob(log_prob_fn, q)
+    p -= 0.5 * step_size * log_grad(q)
     p = -p  # negate for symmetry
 
+    # print('leapgrog-after: ', p, q)
     return q, p
 
 class DualAveragingStepSize:
@@ -208,10 +247,10 @@ class DualAveragingStepSize:
         self.step_bar = np.exp((self.t ** -self.kappa) * log_step + (1 - self.t ** -self.kappa) * np.log(self.step_bar or np.exp(log_step)))
         return np.exp(log_step)
 
-def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=50, chain_length=50, burnin_steps=10, inv_mass_matrix=None, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
+def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, inv_mass_matrix=None, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
     
     q = phi_init.clone()
-    samples = []
+    # samples = []
 
     batch_size, dim = q.shape
 
@@ -231,16 +270,24 @@ def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=
         H_old = hamiltonian(q, p, log_prob_fn, inv_mass_matrix)
         H_new = hamiltonian(q_new, p_new, log_prob_fn, inv_mass_matrix)
 
+        # print('Hamiltonian:')
+        # print(H_old, H_new)
+
         accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0))
-        accept = torch.rand(batch_size) < accept_prob
+        # print(accept_prob, accept_prob.shape)
+        accept = torch.rand(q.shape) < accept_prob
         q[accept] = q_new[accept]
 
         if adapt and i <= n_adapt:
             step_size = step_size_adapter.update(accept_prob.mean().item())
 
-        samples.append(q.clone())
+        # samples.append(q.clone())
 
-    return torch.stack(samples[burnin_steps:], dim=1), step_size, inv_mass_matrix if adapt else torch.stack(samples[burnin_steps:], dim=1)
+    # return torch.stack(samples[burnin_steps:], dim=1), step_size, inv_mass_matrix if adapt else torch.stack(samples[burnin_steps:], dim=1)
+    if adapt:
+        return q, step_size, inv_mass_matrix
+    else: 
+        return q
 
 if __name__ == '__main__':
 
