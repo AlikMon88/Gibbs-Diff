@@ -1,3 +1,6 @@
 gdiff-env/
 gdiff-env-2/
 .env
+
+/modules/comp/KAIR
+/data/archive.zip

@@ -65,14 +65,7 @@ def get_colored_noise_1d(shape, phi=0.0, device=None):
 
     return noise, S
 
-def create_1d_data_colored(
-    n_samples=1000,
-    n_depth=100,
-    phi=1.0,
-    decay=0.1,
-    sigma=0.5,  # Now mandatory (can be scalar or tensor)
-    device=None
-):
+def create_1d_data_colored(n_samples=1000, n_depth=100, phi=1.0, decay=0.1, sigma=0.5, device=None):
     """
     Generate 1D noisy observations from colored noise and sinusoidal signal using diffusion-style mixing.
 
@@ -117,6 +110,59 @@ def create_1d_data_colored(
 
     return observation.cpu().numpy(), signal.cpu().numpy(), noise.cpu().numpy()
 
+import torch
+import numpy as np
+
+def create_1d_data_colored_multi(n_samples=1000, n_depth=100, phi=1.0, decay=0.1, sigma=0.5, device=None):
+    """
+    Generate 1D noisy observations from colored noise and **randomized sinusoidal signals**.
+
+    Args:
+        n_samples: Number of samples (batch size)
+        n_depth: Length of signal
+        phi: Spectral exponent for colored noise
+        decay: Scaling factor for the noise
+        sigma: float or tensor in [0, 1]; can be:
+            - scalar
+            - shape (n_samples,) or (n_samples, 1)
+            - shape (n_samples, n_depth)
+        device: PyTorch device
+
+    Returns:
+        observations, signals, noises: each of shape (n_samples, n_depth)
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    x_vals = np.linspace(-5, 5, n_depth)
+    x_vals = torch.tensor(x_vals, dtype=torch.float32, device=device).view(1, -1).repeat(n_samples, 1)
+
+    # Random signal parameters
+    amplitudes = torch.rand(n_samples, 1, device=device) * 1.0 + 0.5     # [0.5, 1.5]
+    frequencies = torch.rand(n_samples, 1, device=device) * 2.0 + 0.5   # [0.5, 2.5]
+    phases = torch.rand(n_samples, 1, device=device) * 2 * np.pi        # [0, 2π]
+
+    # Create randomized sinusoidal signal per sample
+    signal = amplitudes * torch.sin(frequencies * x_vals + phases)
+
+    # Colored noise
+    noise, _ = get_colored_noise_1d((n_samples, n_depth), phi=phi, device=device)
+    noise = decay * noise
+
+    # Process sigma
+    sigma = torch.tensor(sigma, dtype=torch.float32, device=device)
+    if sigma.ndim == 0:
+        sigma = sigma.view(1, 1).expand(n_samples, n_depth)
+    elif sigma.ndim == 1:
+        sigma = sigma.view(-1, 1).expand(-1, n_depth)
+    elif sigma.shape != (n_samples, n_depth):
+        raise ValueError(f"Incompatible sigma shape: got {sigma.shape}, expected scalar, (n_samples,), or (n_samples, n_depth)")
+
+    # Diffusion-style mixing
+    sqrt_one_minus_sigma2 = torch.sqrt(1.0 - sigma ** 2)
+    observation = sqrt_one_minus_sigma2 * signal + sigma * noise
+
+    return observation.cpu().numpy(), signal.cpu().numpy(), noise.cpu().numpy()
 
 if __name__ == '__main__':
     
