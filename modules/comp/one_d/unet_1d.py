@@ -1,4 +1,126 @@
-class Unet2DGDiff(Module):
+import numpy as np
+import torch 
+import torch.nn as nn
+import math
+
+## --------------------------------------------------------------------------------------------------------
+## --------------------------------GibbsDIFF-1D---------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------
+
+# Phi Embedding Module
+class PhiEmbedding(nn.Module):
+    def __init__(self, alpha_dim, in_dim=100, out_dim=100):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(alpha_dim, in_dim),
+            nn.SiLU(),
+            nn.Linear(in_dim, in_dim),
+            nn.SiLU(),
+            nn.Linear(in_dim, out_dim)
+        )
+
+    def forward(self, alpha):
+        return self.mlp(alpha)
+
+# Basic Convolutional Block 
+## GDiff paper takes 2 conv-layers - this has 1
+class BlockGDiff(Module):
+    def __init__(self, dim, dim_out, dropout=0.):
+        super().__init__()
+        self.proj = nn.Conv1d(dim, dim_out, kernel_size=3, padding=1)
+        self.norm = nn.LayerNorm(dim_out)
+        self.act = nn.SiLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.proj(x)
+        x = rearrange(x, 'b c n -> b n c')
+        x = self.norm(x)
+        x = rearrange(x, 'b n c -> b c n')
+        x = self.act(x)
+        return x
+
+# ResNet Block
+class ResnetBlockGDiff(Module):
+    def __init__(self, dim, dim_out, time_emb_dim=None, dropout=0.):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, dim_out * 2)
+        ) if exists(time_emb_dim) else None
+
+        self.block1 = BlockGDiff(dim, dim_out, dropout=dropout)
+        self.block2 = BlockGDiff(dim_out, dim_out)
+        self.res_conv = nn.Conv1d(dim, dim_out, kernel_size=1) if dim != dim_out else nn.Identity()
+
+    def forward(self, x, time_emb=None):
+        scale_shift = None
+        if exists(self.mlp) and exists(time_emb):
+            time_emb = self.mlp(time_emb)
+            time_emb = rearrange(time_emb, 'b c -> b c 1')
+            scale, shift = time_emb.chunk(2, dim=1)
+            scale_shift = (scale, shift)
+
+        h = self.block1(x)
+        h = self.block2(h)
+
+        return h + self.res_conv(x)
+
+# Time Embedding Module
+class TimeEmbedding(Module):
+    def __init__(self, channels, embed_size):
+        super().__init__()
+        self.channels = channels
+        self.embed_size = embed_size
+
+    def forward(self, t):
+        device = t.device
+        half_dim = self.channels // 2
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, half_dim, device=device).float() / half_dim))
+        t = t.unsqueeze(-1)  # [B, 1]
+        sinusoid = t * inv_freq  # [B, D/2]
+        pos_enc = torch.cat([torch.sin(sinusoid), torch.cos(sinusoid)], dim=-1)  # [B, D]
+        return pos_enc.unsqueeze(-1)  # [B, D, 1]
+
+# Self-Attention Block
+class SelfAttention(Module):
+    def __init__(self, dim, dim_head=32, heads=4):
+        super().__init__()
+        self.scale = dim_head ** -0.5
+        self.heads = heads
+        hidden_dim = dim_head * heads
+
+        self.to_qkv = nn.Conv1d(dim, hidden_dim * 3, kernel_size=1, bias=False)
+        self.to_out = nn.Conv1d(hidden_dim, dim, kernel_size=1)
+
+    def forward(self, x):
+        b, c, n = x.shape
+        qkv = self.to_qkv(x).chunk(3, dim=1)
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) n -> b h c n', h=self.heads), qkv)
+
+        q = q * self.scale
+        sim = einsum('b h d i, b h d j -> b h i j', q, k)
+        attn = sim.softmax(dim=-1)
+        out = einsum('b h i j, b h d j -> b h i d', attn, v)
+
+        out = rearrange(out, 'b h n d -> b (h d) n')
+        return self.to_out(out)
+
+class final_regress(Module):
+    def __init__(self, init_dim, out_dim):
+        super().__init__()
+        self.out_dim = out_dim
+        self.final_regress_layer = nn.Conv1d(
+            in_channels=init_dim,
+            out_channels=self.out_dim,
+            kernel_size=1
+        )
+
+    def forward(self, x):
+        return self.final_regress_layer(x)
+
+
+class Unet1DGDiff(Module):
     def __init__(
         self,
         dim,
@@ -211,5 +333,6 @@ class Unet2DGDiff(Module):
             for hook in hooks:
                 hook.remove()
 
-if __name__ == '__main__.py':
-    print('running __unet_2d.py__')
+
+if __name__ == '__main__':
+    print('running __unet_1d.py__')
