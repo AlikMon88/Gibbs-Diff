@@ -6,6 +6,8 @@ from functools import partial
 from collections import namedtuple
 
 import torch
+from torch.cuda.amp import autocast
+import torch.nn as nn
 
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
@@ -15,14 +17,12 @@ from ema_pytorch import EMA
 from tqdm.auto import tqdm
 
 ## Custom Modules
-from ..utils.helper import *
-from .unet import *
-from ..utils.noise_create import get_colored_noise_1d
-from ..utils.hmc import *
-from ..utils.hmc import sample_hmc
-from ..utils.hmc import get_phi_all_bounds
-
-from torch.cuda.amp import autocast
+from ...utils.helper import *
+from .unet_2d import *
+from ...utils.noise_create_2d import get_colored_noise_2d
+from ...utils.hmc import *
+from ...utils.hmc import sample_hmc
+from ...utils.hmc import get_phi_all_bounds
 
 
 def extract(a, t, x_shape):
@@ -49,70 +49,60 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     return torch.clip(betas, 0, 0.999)
 
 
-class GibbsDiff2D(Module):
+class GibbsDiff2D(nn.Module):
     def __init__(
         self,
         model,
         *,
-        seq_length,
-        num_timesteps = 1000, 
-        sampling_timesteps = None):
+        image_size,
+        num_timesteps=1000,
+        sampling_timesteps=None):
 
         super().__init__()
 
         self.model = model
         self.device = model.device
         self.num_timesteps = num_timesteps
-        self.seq_length = seq_length
+        self.image_size = image_size  # (H, W)
 
         self.beta_small = 0.1 / self.num_timesteps
         self.beta_large = 20 / self.num_timesteps
         self.timesteps_t = torch.arange(0, self.num_timesteps)
         self.beta_t = self.beta_small + (self.timesteps_t / self.num_timesteps) * (self.beta_large - self.beta_small)
         self.alpha_t = 1 - self.beta_t
-        self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0) 
+        self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0)
 
         if not sampling_timesteps:
             self.sampling_timesteps = self.num_timesteps
 
-
     def get_gdiff_loss(self, batch, ts, phi_ps=None):
-        
-        #phi should be a tensor of the size of the batch_size, we want a phi different for each batch element
-        #if batch is a list (the case of ImageFolder for ImageNet): take the first element, otherwise take batch:
+        # phi should be a tensor of the size of the batch_size, we want a phi different for each batch element
         if isinstance(batch, list):
-            batch = batch[0]
+            batch = batch[0]  # batch is a list (e.g. ImageFolder)
 
         bs = batch.shape[0]
         if phi_ps is None:
-            #sample phi_ps between -1 and 1 | shape (batch_size, 1)
-            phi_ps = torch.rand(bs, 1, device=self.device)*2 - 1
+            # sample phi_ps between -1 and 1 | shape (batch_size, 1)
+            phi_ps = torch.rand(bs, 1, device=self.device) * 2 - 1
 
-        #if phi is a scalar, cast to batch dimension. For training on a single phi.
         if isinstance(phi_ps, float) or isinstance(phi_ps, int):
-            phi_ps = phi_ps * torch.ones(bs,1).to(self.device) 
+            phi_ps = phi_ps * torch.ones(bs, 1).to(self.device)
 
-        noise_imgs = []
+        # epsilons: colored noise for each image in the batch
+        epsilons, _ = get_colored_noise_2d(batch.shape, phi_ps, device=self.device)  # Shape: (B, C, H, W)
 
-        ### non-flat PSD colored-noise
-        epsilons, _ = get_colored_noise_1d(batch.shape, phi_ps, device= self.device) #B x seq_dim X seq_len
-        epsilons = epsilons.view(epsilons.shape[0], 1, -1)
+        a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1, 1).to(self.device)
+        noise_imgs = torch.sqrt(a_hat) * batch + torch.sqrt(1 - a_hat) * epsilons  # x_t
 
-        a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1).to(self.device)
-        noise_imgs = torch.sqrt(a_hat) * batch + torch.sqrt(1 - a_hat) * epsilons ## x_t
-
-        e_hat = self.model(noise_imgs, ts, phi_ps=phi_ps) ## since noise is parameterised by (phi)
+        e_hat = self.model(noise_imgs, ts, phi_ps=phi_ps)  # predict noise
         loss = nn.functional.mse_loss(e_hat, epsilons)
 
         return loss
 
     def forward(self, img, *args, **kwargs):
-        
-        b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
-        assert n == seq_length, f'seq length must be {seq_length}'
-        t = torch.randint(0, self.num_timesteps, (b, ), device=device).long() ### t ~ uniformly-sampled(0, num_timesteps) == batch_size
-
-        # img = self.normalize(img)
+        b, c, h, w = img.shape
+        assert (h, w) == self.image_size, f'image size must be {self.image_size}'
+        t = torch.randint(0, self.num_timesteps, (b,), device=img.device).long()
         return self.get_gdiff_loss(img, t, *args, **kwargs)
 
     def get_closest_timestep(self, noise_level, ret_sigma=False):
@@ -232,59 +222,45 @@ class GibbsDiff2D(Module):
 
     @torch.no_grad()
     def denoise_1step_gdiff(self, x, t, phi_ps=None):
-        """
-        Denoises one step given an phi (if phi_ps=None, it is sampled uniformly in [-1,1]) and a timestep t.
-        x_{t-1} = (1 / sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_bar_t)) * e_hat) + sqrt(beta_t) * z_phi
-        """
-
-        #phi should be a tensor of the size of the batch_size, we want a different phi for each batch element
+        # phi should be a tensor of the size of the batch_size, we want a different phi for each batch element
         if phi_ps is None:
-            # If no phi_ps is given, assume it's white noise, i.e. phi_ps = 0
-            phi_ps = torch.zeros(x.shape[0],1, device=self.device).float()
-        
-        #if phi is a scalar, cast to batch dimension
+            phi_ps = torch.zeros(x.shape[0], 1, device=self.device).float()
+
         if isinstance(phi_ps, int) or isinstance(phi_ps, float):
-            phi_ps = phi_ps * torch.ones(x.shape[0],1, device=self.device).float() 
-        
-        else: 
+            phi_ps = phi_ps * torch.ones(x.shape[0], 1, device=self.device).float()
+        else:
             phi_ps = phi_ps.to(self.device).float()
-        
+
         with torch.no_grad():
             if t > 1:
-                z, _ = get_colored_noise_1d(x.shape, phi_ps, device= self.device)
+                z, _ = get_colored_noise_2d(x.shape, phi_ps, device=self.device)
             else:
                 z = 0
-            
+
             t_ch = t.view(1).repeat(x.shape[0],)
             e_hat = self.model(x, t_ch, phi_ps=phi_ps)
             pre_scale = 1 / math.sqrt(self.alpha_t[t])
-            e_scale = (self.beta_t[t]) / math.sqrt(1 - self.alpha_bar_t[t])
+            e_scale = self.beta_t[t] / math.sqrt(1 - self.alpha_bar_t[t])
             post_sigma = math.sqrt(self.beta_t[t]) * z
             x = pre_scale * (x - e_scale * e_hat) + post_sigma
             return x
-    
+
     @torch.no_grad()
     def denoise_samples_batch_time(self, noisy_batch, timesteps, batch_origin=None, return_sample=False, phi_ps=None):
-        """
-        Denoises a batch of images for a given number of timesteps (which can be different across the batch).
-        """
-        
         max_timesteps = torch.max(timesteps)
-        mask = torch.ones(noisy_batch.shape[0], max_timesteps+1).to(self.device)
+        mask = torch.ones(noisy_batch.shape[0], max_timesteps + 1).to(self.device)
 
         for i in range(noisy_batch.shape[0]):
             mask[i, timesteps[i]+1:] = 0
 
-        ## Reverse-Diffusion (t(x_t) -> 0) --> Denoising from t to 0 | NOT Generating | Ancestral Sampling
         for t in range(max_timesteps, 0, -1):
-            noisy_batch = self.denoise_1step_gdiff(noisy_batch, torch.tensor(t), phi_ps) * (mask[:, t]).reshape(-1,1,1) + noisy_batch * (1 - mask[:, t]).reshape(-1,1,1)
-        
-        # noisy_batch = self.unnormalize(noisy_batch)
+            noisy_batch = self.denoise_1step_gdiff(noisy_batch, torch.tensor(t), phi_ps) * (mask[:, t]).reshape(-1, 1, 1, 1) + \
+                          noisy_batch * (1 - mask[:, t]).reshape(-1, 1, 1, 1)
 
         if batch_origin is None:
             return noisy_batch
         else:
             if return_sample:
-                return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), noisy_batch
+                return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), noisy_batch
             else:
-                return torch.mean(torch.norm(noisy_batch-batch_origin, dim = (-2,-1))), None
+                return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), None

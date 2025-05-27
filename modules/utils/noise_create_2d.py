@@ -44,7 +44,7 @@ def load_images_cv2(image_paths, size=(64, 64)):
     return images  # shape: (B, C, H, W)
 
 
-def get_2d_noise(shape, phi=0, ret_psd=False):
+def get_colored_noise_2d(shape, phi=0, ret_psd=False):
     """
     Args:
         shape: (int tuple or torch.Size) shape of the image
@@ -118,7 +118,7 @@ def create_2d_data_colored(image_paths, n_samples=None, phi=1.0, decay=1.0, sigm
         plt.show()
 
     # Generate 2D colored noise
-    noise = get_2d_noise((B, C, H, W), phi=phi)
+    noise = get_colored_noise_2d((B, C, H, W), phi=phi)
     noise = decay * noise
 
     # Broadcast sigma

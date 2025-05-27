@@ -7,10 +7,11 @@ import math
 ## --------------------------------GibbsDIFF-1D---------------------------------------------------------------
 ## --------------------------------------------------------------------------------------------------------
 
+## add 2-conv2d layers
 class BlockGDiff2D(nn.Module):
-    def __init__(self, dim, dim_out, dropout=0.):
+    def __init__(self, dim, dim_out, dropout=0.2):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, kernel_size=3, padding=1)
+        self.proj = nn.Conv2d(dim, dim_out, kernel_size=3, padding=1) ## padding = 'same'?
         self.norm = nn.GroupNorm(1, dim_out)  # Suitable for spatial data
         self.act = nn.SiLU()
         self.dropout = nn.Dropout2d(dropout)
@@ -120,7 +121,7 @@ class Unet2DGDiff(nn.Module):
         self,
         dim,
         channels,
-        dropout=0.,
+        dropout=0.2,
         phi_dim=1,
         attn_dim_head=32,
         attn_heads=4, 
@@ -181,9 +182,9 @@ class Unet2DGDiff(nn.Module):
         # Up blocks
         self.up_blocks = nn.ModuleList([
             ResnetBlockGDiff2D(nc_5 + nc_4, nc_4),
-            ResnetBlockGDiff2D(nc_4 + nc_3, nc_3),
-            ResnetBlockGDiff2D(nc_3 + nc_2, nc_2),
-            ResnetBlockGDiff2D(nc_2 + nc_1, nc_1)
+            ResnetBlockGDiff2D(nc_4 + nc_4, nc_3),
+            ResnetBlockGDiff2D(nc_3 + nc_3, nc_2),
+            ResnetBlockGDiff2D(nc_2 + nc_2, nc_1)
         ])
 
         self.time_embeddings_up = nn.ModuleList([
@@ -225,6 +226,9 @@ class Unet2DGDiff(nn.Module):
         x = x + self.time_embeddings[-1](t).unsqueeze(-1).unsqueeze(-1)
         x = self.att_bottleneck(x)
         x = self.bottl_down(x)
+
+        print('after-bottleneck: ', x.shape)
+        print('residual: ', [res.shape for res in residuals])
 
         # Up path
         for i, up in enumerate(self.up_blocks):
