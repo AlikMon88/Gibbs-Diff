@@ -101,7 +101,7 @@ class GibbsDiff2D(nn.Module):
 
     def forward(self, img, *args, **kwargs):
         b, c, h, w = img.shape
-        assert (h, w) == self.image_size, f'image size must be {self.image_size}'
+        assert (c, h, w) == self.image_size, f'image size must be {self.image_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=img.device).long()
         return self.get_gdiff_loss(img, t, *args, **kwargs)
 

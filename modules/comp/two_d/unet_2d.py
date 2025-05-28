@@ -226,10 +226,7 @@ class Unet2DGDiff(nn.Module):
         x = x + self.time_embeddings[-1](t).unsqueeze(-1).unsqueeze(-1)
         x = self.att_bottleneck(x)
         x = self.bottl_down(x)
-
-        print('after-bottleneck: ', x.shape)
-        print('residual: ', [res.shape for res in residuals])
-
+        
         # Up path
         for i, up in enumerate(self.up_blocks):
             res = residuals[-(i + 1)]

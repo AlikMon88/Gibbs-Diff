@@ -146,7 +146,7 @@ class Trainer1D:
 #### ---------------------------GibbsDIFF-----------------------------------------------
 #### -----------------------------------------------------------------------------------
 
-class Trainer1DGDiff:
+class TrainerGDiff:
     def __init__(
         self,
         diffusion_model: nn.Module,
@@ -163,13 +163,18 @@ class Trainer1DGDiff:
         save_and_sample_every: int = 1000,
         num_samples: int = 25,
         results_folder: str = './results',
-        max_grad_norm: float = 1.0
+        max_grad_norm: float = 1.0,
+        mode = '1D'
     ):
         super().__init__()
 
         # model and channels (CPU only)
         self.model = diffusion_model
         self.channels = getattr(diffusion_model, 'channels', 1)
+        self.mode = mode
+
+        if not (self.mode == '1D' or self.mode == '2D'):
+            raise ValueError("Wrong mode supplied (1D/2D)")
 
         # sampling & training settings
         assert num_samples**0.5 == int(num_samples**0.5), 'num_samples must have integer square root'
@@ -225,8 +230,10 @@ class Trainer1DGDiff:
 
             # Get training batch and reshape
             batch = next(self.dl)
-            batch = batch.reshape(batch.shape[0], 1, -1)
-
+            
+            if self.mode == '1D':
+                batch = batch.reshape(batch.shape[0], 1, -1)
+            
             # Forward and backward pass
             loss = self.model(batch)
             loss.backward()
@@ -247,7 +254,8 @@ class Trainer1DGDiff:
             val_loss = 0.0
             with torch.no_grad():
                 for val_batch in self.val_dl:
-                    val_batch = val_batch.reshape(val_batch.shape[0], 1, -1)
+                    if self.mode == '1D':
+                        val_batch = val_batch.reshape(val_batch.shape[0], 1, -1)
                     val_loss += self.model(val_batch).item()
             val_loss_curve.append(val_loss)
 

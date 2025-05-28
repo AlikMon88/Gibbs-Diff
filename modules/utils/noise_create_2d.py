@@ -44,7 +44,7 @@ def load_images_cv2(image_paths, size=(64, 64)):
     return images  # shape: (B, C, H, W)
 
 
-def get_colored_noise_2d(shape, phi=0, ret_psd=False):
+def get_colored_noise_2d(shape, phi=0, device=None):
     """
     Args:
         shape: (int tuple or torch.Size) shape of the image
@@ -54,17 +54,20 @@ def get_colored_noise_2d(shape, phi=0, ret_psd=False):
         noise: colored noise
         ps: power spectrum
     """
-    
+
+    if not device:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu' 
+
     assert len(shape) == 4 # (B, C, H, W)
     assert shape[2] == shape[3] # (B, C, H, W)
     if isinstance(phi, float) or isinstance(phi, int):
-        phi = torch.tensor(phi).repeat(shape[0], 1)
+        phi = torch.tensor(phi).to(device).repeat(shape[0], 1)
     else:
         assert phi.shape == (shape[0], 1)
    
     N = shape[2]
 
-    wn = torch.fft.fftfreq(N).reshape((N, 1))
+    wn = torch.fft.fftfreq(N).to(device).reshape((N, 1))
     S = torch.zeros((shape[0], shape[1], N, N))
     for i in range(2): ## we are in 2D
         S += torch.moveaxis(wn, 0, i).pow(2)
@@ -74,15 +77,12 @@ def get_colored_noise_2d(shape, phi=0, ret_psd=False):
     S[:, :, 0, 0] = 1.0
     S.div_(torch.mean(S, dim=(-1, -2), keepdim=True))  # Normalize S to keep std = 1
 
-    X_white = torch.fft.fftn(torch.randn(shape), dim=(2,3))
+    X_white = torch.fft.fftn(torch.randn(shape, device=device), dim=(2,3))
     X_shaped = X_white * torch.sqrt(S)
     noises = torch.fft.ifftn(X_shaped, dim=(2,3)).real
     
-    if ret_psd:
-        return noises, S
-    else:
-        return noises
-
+    return noises, S
+    
 def create_2d_data_colored(image_paths, n_samples=None, phi=1.0, decay=1.0, sigma=0.5, size=(64, 64), is_plot=False):
     """
     Applies colored noise to RGB images using diffusion-style mixing.
@@ -118,7 +118,7 @@ def create_2d_data_colored(image_paths, n_samples=None, phi=1.0, decay=1.0, sigm
         plt.show()
 
     # Generate 2D colored noise
-    noise = get_colored_noise_2d((B, C, H, W), phi=phi)
+    noise, _ = get_colored_noise_2d((B, C, H, W), phi=phi)
     noise = decay * noise
 
     # Broadcast sigma
