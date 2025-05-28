@@ -121,10 +121,16 @@ class GibbsDiff2D(nn.Module):
     
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False):
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, mode='1D', n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False):
 
         device = self.model.device
-        ps_model = ColoredPowerSpectrum1D(device=device)
+        
+        if mode == '1D':
+            ps_model = ColoredPowerSpectrum1D(shape=yt.shape[1:], device=device)
+        elif mode == '2D':
+            ps_model = ColoredPowerSpectrum2D(shape=yt.shape[1:], device=device)
+        else:
+            raise ValueError('wrong mode passed')
 
         phi_max = 1.0
         phi_min = -phi_max

@@ -92,7 +92,6 @@ def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
     # print('ret-prior: ', ret)
     # return ret
 
-### All these prior and Log-likelihood functions are returning nan
 def log_likelihood_eps_phi(phi, eps, ps_model):
 
     eps_dim = eps.shape[-1]  # N
@@ -121,31 +120,40 @@ def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
     
     ret = term_pi + term_logdet + term_x
     
-    # print('log-likelihood: ', ret)
-    # print(term_pi, term_logdet, term_x)
     return ret
 
-# class ColoredPowerSpectrum1D(nn.Module):
+## We gradient-trace the ColoredPoweredSpectrum
+class ColoredPowerSpectrum2D(nn.Module):
+    def __init__(self, norm_input_phi='compact', shape=(3, 64, 64), device='cpu', sigma_eps=1e-6):
+        super().__init__()
+        assert len(shape) == 3  # (dim, H, W)
+        self.norm_input_phi = norm_input_phi
+        self.device = device
 
-#     def __init__(self, seq_len=100, device='cpu'):
-#         super().__init__()
+        dim, H, W = shape
 
-#         k = torch.fft.fftfreq(seq_len, d=1.0).to(device)
-#         k[0] = sigma_eps  # avoid divide by zero
-#         self.k = k
-#         self.device = device
+        # Create 2D isotropic wavenumber grid
+        ky = torch.fft.fftfreq(H, d=1.0).to(torch.float32).to(device)  # (H,)
+        kx = torch.fft.fftfreq(W, d=1.0).to(torch.float32).to(device)  # (W,)
+        kx, ky = torch.meshgrid(kx, ky, indexing='ij')  # (W, H)
+        k_squared = kx ** 2 + ky ** 2
+        k_magnitude = torch.sqrt(k_squared).unsqueeze(0).unsqueeze(0)  # shape: (1, 1, H, W)
+        k_magnitude[:, :, 0, 0] = sigma_eps  # avoid division by zero at (0, 0)
 
-#     def forward(self, phi):
-#         phi = unnormalize_phi(phi, mode="compact" if phi.ndim == 1 else "inf")
+        self.S = k_magnitude  # shape: (1, 1, H, W)
 
-#         if phi.ndim == 0:
-#             phi = phi.reshape(1)
+    def forward(self, phi):
+        '''
+        phi: tensor of shape (batch_size, dim) or (batch_size, 1)
+             controls the spectral slope alpha
+        '''
+        phi = unnormalize_phi(phi, mode=self.norm_input_phi)
 
-#         batch_size = phi.shape[0]
-#         k = self.k.unsqueeze(0).expand(batch_size, -1)
-#         S = k ** phi.unsqueeze(1)
-#         S = S / S.mean(dim=1, keepdim=True)
-#         return S
+        batch_size, dim = phi.shape[0], self.S.shape[1]
+        S = self.S.repeat(batch_size, dim, 1, 1)        # (batch_size, dim, H, W)
+        S = S ** phi.reshape(-1, 1, 1, 1)               # (batch_size, dim, H, W)
+        S = S / S.mean(dim=(2, 3), keepdim=True)        # Normalize spectrum per sample
+        return S
 
 class ColoredPowerSpectrum1D(nn.Module):
     def __init__(self, norm_input_phi='compact', shape=(1, 100), device='cpu'):
