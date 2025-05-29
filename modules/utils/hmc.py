@@ -82,51 +82,86 @@ def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
     # print(logp, sigma_, logp.shape, sigma_.shape)
     logp += sigma_
 
-    # print('log-prior: ', logp)
+    # print('log-prior: ', logp.shape)
     return logp
 
-    # prior_phi = log_prior_phi(phi, norm_mode)
-    # valid_sigma = (sigma >= sigma_min) & (sigma <= sigma_max)
-    # prior_sigma = torch.where(valid_sigma, torch.zeros_like(sigma), torch.full_like(sigma, -float('inf')))
-    # ret = prior_phi + prior_sigma
-    # print('ret-prior: ', ret)
-    # return ret
 
 def log_likelihood_eps_phi(phi, eps, ps_model):
-
-    eps_dim = eps.shape[-1]  # N
-    ps = ps_model(phi)       # Should return same shape as eps
-
-    xf = torch.fft.fft(eps)
-    term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
-    term_logdet = -0.5 * torch.sum(torch.log(ps), dim=-1)
-    term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / ps, dim=-1) / eps_dim
-
-    ret = term_pi + term_logdet + term_x
-    return ret
-
-def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model): ## ~ return nan
+    """
+    Log-likelihood without sigma, for 1D or 2D eps.
     
-    eps_dim = eps.shape[-1]
-    ps = ps_model(phi)  # Same shape as eps
-    sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # broadcast
-
-    xf = torch.fft.fft(eps)
-    scaled_ps = sigma**2 * ps
-
-    term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
-    term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=-1)
-    term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / scaled_ps, dim=-1) / eps_dim
+    phi: (batch_size, dim)
+    eps: (batch_size, N) for 1D, or (batch_size, dim, H, W) for 2D
+    ps_model: callable that maps phi -> power spectrum of same shape as eps (except batch)
+    """
+    ps = ps_model(phi)  # shape: same as eps (excluding batch)
     
-    ret = term_pi + term_logdet + term_x
+    if eps.ndim == 2:  # 1D case: (B, dim, N)
+        eps_dim = eps.shape[-1]
+        xf = torch.fft.fft(eps)
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(ps), dim=-1)
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / ps, dim=-1) / eps_dim
+
+    elif eps.ndim == 4:  # 2D case: (B, C, H, W)
+        H, W = eps.shape[-2], eps.shape[-1]
+        eps_dim = H * W
+        xf = torch.fft.fft2(eps)
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(ps), dim=(-2, -1))  # sum over H, W
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / ps, dim=(-2, -1)) / eps_dim
+
+    else:
+        raise ValueError("eps must be 2D (1D case) or 4D (image case)")
+
+    log_likelihood = term_pi + term_logdet + term_x  # (b, dim)
+    log_likelihood = log_likelihood.sum(dim=1)       # (b,) --> sum over the channel dimm
+    return log_likelihood
+
+
+def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model):
+    """
+    Log-likelihood with sigma scaling, for 1D or 2D eps.
     
-    return ret
+    phi: (batch_size, dim)
+    sigma: (batch_size,) or (batch_size, 1)
+    eps: (batch_size, N) or (batch_size, C, H, W)
+    ps_model: callable that maps phi -> power spectrum of same shape as eps (excluding batch)
+    """
+    ps = ps_model(phi)
+
+    if eps.ndim == 2:  # 1D case
+        eps_dim = eps.shape[-1]
+        xf = torch.fft.fft(eps)
+        sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # (B, 1)
+        scaled_ps = sigma**2 * ps
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=-1)
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=-1) / eps_dim
+
+    elif eps.ndim == 4:  # 2D image case
+        H, W = eps.shape[-2], eps.shape[-1]
+        eps_dim = H * W
+        xf = torch.fft.fft2(eps)
+        sigma = sigma.view(-1, 1, 1, 1) if sigma.ndim == 1 else sigma
+        scaled_ps = sigma**2 * ps
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=(-2, -1))
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=(-2, -1)) / eps_dim
+
+    else:
+        raise ValueError("eps must be 2D (1D case) or 4D (image case)")
+    
+    log_likelihood = term_pi + term_logdet + term_x  # (b, dim)
+    log_likelihood = log_likelihood.sum(dim=1)       # (b,) --> sum over the channel dim
+    return log_likelihood
+
 
 ## We gradient-trace the ColoredPoweredSpectrum
 class ColoredPowerSpectrum2D(nn.Module):
     def __init__(self, norm_input_phi='compact', shape=(3, 64, 64), device='cpu', sigma_eps=1e-6):
         super().__init__()
-        assert len(shape) == 3  # (dim, H, W)
+        assert len(shape) == 3  # (C, H, W)
         self.norm_input_phi = norm_input_phi
         self.device = device
 
@@ -137,10 +172,10 @@ class ColoredPowerSpectrum2D(nn.Module):
         kx = torch.fft.fftfreq(W, d=1.0).to(torch.float32).to(device)  # (W,)
         kx, ky = torch.meshgrid(kx, ky, indexing='ij')  # (W, H)
         k_squared = kx ** 2 + ky ** 2
-        k_magnitude = torch.sqrt(k_squared).unsqueeze(0).unsqueeze(0)  # shape: (1, 1, H, W)
+        k_magnitude = torch.sqrt(k_squared).unsqueeze(0).unsqueeze(0)  # shape: (1, C, H, W)
         k_magnitude[:, :, 0, 0] = sigma_eps  # avoid division by zero at (0, 0)
 
-        self.S = k_magnitude  # shape: (1, 1, H, W)
+        self.S = k_magnitude  # shape: (1, C, H, W)
 
     def forward(self, phi):
         '''
@@ -282,7 +317,9 @@ def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=
         # print(H_old, H_new)
 
         accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0))
-        # print(accept_prob, accept_prob.shape)
+        
+        # print('accept-prob: ', accept_prob, accept_prob.shape, q.shape)
+        
         accept = torch.rand(q.shape) < accept_prob
         q[accept] = q_new[accept]
 

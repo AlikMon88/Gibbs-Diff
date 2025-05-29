@@ -6,6 +6,7 @@ from functools import partial
 from collections import namedtuple
 
 import torch
+import torch.nn as nn
 
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
@@ -15,12 +16,12 @@ from ema_pytorch import EMA
 from tqdm.auto import tqdm
 
 ## Custom Modules
-from ..utils.helper import *
-from .unet import *
-from ..utils.noise_create import get_colored_noise_1d
-from ..utils.hmc import *
-from ..utils.hmc import sample_hmc
-from ..utils.hmc import get_phi_all_bounds
+from ...utils.helper import *
+from .unet_1d import *
+from ...utils.noise_create import get_colored_noise_1d
+from ...utils.hmc import *
+from ...utils.hmc import sample_hmc
+from ...utils.hmc import get_phi_all_bounds
 
 from torch.cuda.amp import autocast
 
@@ -49,12 +50,12 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     return torch.clip(betas, 0, 0.999)
 
 
-class GibbsDiff1D(Module):
+class GibbsDiff1D(nn.Module):
     def __init__(
         self,
         model,
         *,
-        seq_length,
+        seq_len,
         num_timesteps = 1000, 
         sampling_timesteps = None):
 
@@ -63,7 +64,7 @@ class GibbsDiff1D(Module):
         self.model = model
         self.device = model.device
         self.num_timesteps = num_timesteps
-        self.seq_length = seq_length
+        self.seq_len = seq_len
 
         self.beta_small = 0.1 / self.num_timesteps
         self.beta_large = 20 / self.num_timesteps
@@ -108,8 +109,8 @@ class GibbsDiff1D(Module):
 
     def forward(self, img, *args, **kwargs):
         
-        b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
-        assert n == seq_length, f'seq length must be {seq_length}'
+        b, c, n, device, seq_len, = *img.shape, img.device, self.seq_len
+        assert n == seq_len, f'seq length must be {seq_len}'
         t = torch.randint(0, self.num_timesteps, (b, ), device=device).long() ### t ~ uniformly-sampled(0, num_timesteps) == batch_size
 
         # img = self.normalize(img)

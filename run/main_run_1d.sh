@@ -14,4 +14,4 @@ module load cuda/11.8
 source /home/am3353/am3353/gdiff-env/bin/activate
 
 # Use accelerate launch to control number of machines and processes
-accelerate launch --num_machines=1 --num_processes=1 modules/main_run.py --mode=1D
+accelerate launch --num_machines=1 --num_processes=1 -m modules.main_run --mode=1D

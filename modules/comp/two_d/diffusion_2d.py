@@ -24,6 +24,14 @@ from ...utils.hmc import *
 from ...utils.hmc import sample_hmc
 from ...utils.hmc import get_phi_all_bounds
 
+## Absoulute Imports
+# from modules.utils.helper import *
+# from unet_2d import *
+# from modules.utils.noise_create_2d import get_colored_noise_2d
+# from modules.utils.hmc import *
+# from modules.utils.hmc import sample_hmc
+# from modules.utils.hmc import get_phi_all_bounds
+
 
 def extract(a, t, x_shape):
     b, *_ = t.shape
@@ -124,11 +132,14 @@ class GibbsDiff2D(nn.Module):
     def run_gibbs_sampler(self, y, yt, num_chains_per_sample, mode='1D', n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False):
 
         device = self.model.device
-        
+
+        shape_ = yt.shape[1:]
+        # print('shape: ', shape_)
+
         if mode == '1D':
-            ps_model = ColoredPowerSpectrum1D(shape=yt.shape[1:], device=device)
+            ps_model = ColoredPowerSpectrum1D(shape=shape_, device=device)
         elif mode == '2D':
-            ps_model = ColoredPowerSpectrum2D(shape=yt.shape[1:], device=device)
+            ps_model = ColoredPowerSpectrum2D(shape=shape_, device=device)
         else:
             raise ValueError('wrong mode passed')
 

@@ -3,6 +3,10 @@ import torch
 import torch.nn as nn
 import math
 
+from ...utils.helper import *
+from einops import rearrange
+
+
 ## --------------------------------------------------------------------------------------------------------
 ## --------------------------------GibbsDIFF-1D---------------------------------------------------------------
 ## --------------------------------------------------------------------------------------------------------
@@ -24,7 +28,7 @@ class PhiEmbedding(nn.Module):
 
 # Basic Convolutional Block 
 ## GDiff paper takes 2 conv-layers - this has 1
-class BlockGDiff(Module):
+class BlockGDiff(nn.Module):
     def __init__(self, dim, dim_out, dropout=0.):
         super().__init__()
         self.proj = nn.Conv1d(dim, dim_out, kernel_size=3, padding=1)
@@ -41,7 +45,7 @@ class BlockGDiff(Module):
         return x
 
 # ResNet Block
-class ResnetBlockGDiff(Module):
+class ResnetBlockGDiff(nn.Module):
     def __init__(self, dim, dim_out, time_emb_dim=None, dropout=0.):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -67,7 +71,7 @@ class ResnetBlockGDiff(Module):
         return h + self.res_conv(x)
 
 # Time Embedding Module
-class TimeEmbedding(Module):
+class TimeEmbedding(nn.Module):
     def __init__(self, channels, embed_size):
         super().__init__()
         self.channels = channels
@@ -83,7 +87,7 @@ class TimeEmbedding(Module):
         return pos_enc.unsqueeze(-1)  # [B, D, 1]
 
 # Self-Attention Block
-class SelfAttention(Module):
+class SelfAttention(nn.Module):
     def __init__(self, dim, dim_head=32, heads=4):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -99,14 +103,14 @@ class SelfAttention(Module):
         q, k, v = map(lambda t: rearrange(t, 'b (h c) n -> b h c n', h=self.heads), qkv)
 
         q = q * self.scale
-        sim = einsum('b h d i, b h d j -> b h i j', q, k)
+        sim = torch.einsum('b h d i, b h d j -> b h i j', q, k)
         attn = sim.softmax(dim=-1)
-        out = einsum('b h i j, b h d j -> b h i d', attn, v)
+        out = torch.einsum('b h i j, b h d j -> b h i d', attn, v)
 
         out = rearrange(out, 'b h n d -> b (h d) n')
         return self.to_out(out)
 
-class final_regress(Module):
+class final_regress(nn.Module):
     def __init__(self, init_dim, out_dim):
         super().__init__()
         self.out_dim = out_dim
@@ -120,7 +124,7 @@ class final_regress(Module):
         return self.final_regress_layer(x)
 
 
-class Unet1DGDiff(Module):
+class Unet1DGDiff(nn.Module):
     def __init__(
         self,
         dim,
@@ -262,8 +266,8 @@ class Unet1DGDiff(Module):
         """
         
         # Create example inputs
-        x = torch.zeros(x_shape).to(device)
-        t = torch.zeros(t_shape, dtype=torch.long).to(device)
+        x = torch.zeros(x_shape).to(self.device)
+        t = torch.zeros(t_shape, dtype=torch.long).to(self.device)
         
         # Dictionary to store layer info
         layer_info = []
