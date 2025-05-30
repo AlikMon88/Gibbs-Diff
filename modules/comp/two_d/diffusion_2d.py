@@ -72,6 +72,7 @@ class GibbsDiff2D(nn.Module):
         self.device = model.device
         self.num_timesteps = num_timesteps
         self.image_size = image_size  # (H, W)
+        self.channels = 3
 
         self.beta_small = 0.1 / self.num_timesteps
         self.beta_large = 20 / self.num_timesteps
@@ -129,20 +130,15 @@ class GibbsDiff2D(nn.Module):
     
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, mode='1D', n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False):
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False):
 
         device = self.model.device
 
         shape_ = yt.shape[1:]
         # print('shape: ', shape_)
 
-        if mode == '1D':
-            ps_model = ColoredPowerSpectrum1D(shape=shape_, device=device)
-        elif mode == '2D':
-            ps_model = ColoredPowerSpectrum2D(shape=shape_, device=device)
-        else:
-            raise ValueError('wrong mode passed')
-
+        ps_model = ColoredPowerSpectrum2D(shape=shape_, device=device)
+        
         phi_max = 1.0
         phi_min = -phi_max
 
@@ -225,17 +221,25 @@ class GibbsDiff2D(nn.Module):
             return phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
 
     ## there are 2 MCMC (HMC and Gibbs) chains we talk about the gibbs chain ofc 
-    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2): ## last avg_pmean positions
+    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False): ## last avg_pmean positions
         
         '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
 
         phi_all, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True)
         # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
         # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
-        x_denoised_pmean = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_mean, self.channels, self.seq_len).mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
-        
-        return phi_all, x_denoised_pmean
-        
+
+        phi_all_posterior = phi_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, 2)
+        x_denoised_posterior = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, self.channels, self.image_size[0], self.image_size[-1])
+
+        x_denoised_pmean = x_denoised_posterior.mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
+        phi_all_mean = phi_all_posterior.mean(dim=(0, 2))
+
+        if not return_post:
+            return phi_all_mean, x_denoised_pmean
+        else:
+            return phi_all_posterior, x_denoised_posterior
+
 
     @torch.no_grad()
     def denoise_1step_gdiff(self, x, t, phi_ps=None):

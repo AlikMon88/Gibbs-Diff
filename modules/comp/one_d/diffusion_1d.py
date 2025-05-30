@@ -65,6 +65,7 @@ class GibbsDiff1D(nn.Module):
         self.device = model.device
         self.num_timesteps = num_timesteps
         self.seq_len = seq_len
+        self.channels = 1
 
         self.beta_small = 0.1 / self.num_timesteps
         self.beta_large = 20 / self.num_timesteps
@@ -72,6 +73,11 @@ class GibbsDiff1D(nn.Module):
         self.beta_t = self.beta_small + (self.timesteps_t / self.num_timesteps) * (self.beta_large - self.beta_small)
         self.alpha_t = 1 - self.beta_t
         self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0) 
+
+        self.n_leapfrog_steps = 2  
+        self.chain_length =  5
+        self.burnin_steps = 2
+        self.n_adapt = 5
 
         if not sampling_timesteps:
             self.sampling_timesteps = self.num_timesteps
@@ -147,8 +153,7 @@ class GibbsDiff1D(nn.Module):
         # Repeat inputs for each chain
         y = y.repeat_interleave(chains, dim=0)     # (B * C, ...)
         yt = yt.repeat_interleave(chains, dim=0)   # (B * C, ...)
-        # print(y.shape, yt.shape)
-
+    
         # Initialize phi and sigma
         phi_init = sample_phi_prior(total_chains).unsqueeze(1)  # (B*C, 1)
         sigma_init = get_noise_estimate(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)  # (B*C, 1)
@@ -168,6 +173,9 @@ class GibbsDiff1D(nn.Module):
         log_prior = lambda phi: log_prior_phi_sigma(phi[:, 0], phi[:, 1])
         ## log-likelihood(eps|phi) 
         log_likelihood = lambda phi, eps: log_likelihood_eps_phi_sigma(phi[:, 0], phi[:, 1], eps, ps_model)
+        ## HMC-Sampler
+        hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, \
+        inv_mass_matrix=inv_mass_matrix, adapt=True, n_adapt=self.n_adapt, phi_min_norm=None, phi_max_norm=None) 
 
         for i in range(n_it_gibbs + n_it_burnin):
 
@@ -182,7 +190,7 @@ class GibbsDiff1D(nn.Module):
             t = self.get_closest_timestep(phi[:, 1])  # sigma values
             x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
             epsilon = (y - x)
-            # print('epsilon:')
+            # print('epsilon:', epsilon.shape)
             # print(torch.mean(epsilon, dim=-1))
 
             # Step 2: HMC Sampling
@@ -196,17 +204,16 @@ class GibbsDiff1D(nn.Module):
 
                 phi_clone = phi.clone().requires_grad_(True)
                 logp = log_posterior(phi_clone, epsilon)
-                # print('logp:')
-                # print(type(logp), logp.shape, logp)
-                # print('logp.requires_grad:', logp.requires_grad)
-                # print('logp.grad_fn:', logp.grad_fn)
                 grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
                 return grad_phi
 
             if i == 0:
-                phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
+                # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, adapt=True)
+                phi_new, step_size, inv_mass_matrix = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.1, inv_mass_matrix=None)
+           
             else:
-                phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+                # phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+                phi_new, step_size, inv_mass_matrix = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix)
 
             phi_all.append(phi_new)
             x_all.append(x)
@@ -219,17 +226,24 @@ class GibbsDiff1D(nn.Module):
             return phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
 
     ## there are 2 MCMC (HMC and Gibbs) chains we talk about the gibbs chain ofc 
-    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2): ## last avg_pmean positions
+    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False): ## last avg_pmean positions
         
         '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
 
         phi_all, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True)
         # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
         # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
-        x_denoised_pmean = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_mean, self.channels, self.seq_len).mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
         
-        return phi_all, x_denoised_pmean
+        phi_all_posterior = phi_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, 2)
+        x_denoised_posterior = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, self.channels, self.seq_len) 
         
+        x_denoised_pmean = x_denoised_posterior.mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
+        phi_all_mean = phi_all_posterior.mean(dim=(0, 2))
+
+        if not return_post:
+            return phi_all_mean, x_denoised_pmean
+        else:
+            return phi_all_posterior, x_denoised_posterior
 
     @torch.no_grad()
     def denoise_1step_gdiff(self, x, t, phi_ps=None):
@@ -253,11 +267,12 @@ class GibbsDiff1D(nn.Module):
         with torch.no_grad():
             if t > 1:
                 z, _ = get_colored_noise_1d(x.shape, phi_ps, device= self.device)
+                z = z.reshape(z.shape[0], 1, -1)
             else:
                 z = 0
             
             t_ch = t.view(1).repeat(x.shape[0],)
-            e_hat = self.model(x, t_ch, phi_ps=phi_ps)
+            e_hat = self.model(x, t_ch, phi_ps=phi_ps) ## (b, dim, seq_dim)
             pre_scale = 1 / math.sqrt(self.alpha_t[t])
             e_scale = (self.beta_t[t]) / math.sqrt(1 - self.alpha_bar_t[t])
             post_sigma = math.sqrt(self.beta_t[t]) * z
@@ -278,7 +293,8 @@ class GibbsDiff1D(nn.Module):
 
         ## Reverse-Diffusion (t(x_t) -> 0) --> Denoising from t to 0 | NOT Generating | Ancestral Sampling
         for t in range(max_timesteps, 0, -1):
-            noisy_batch = self.denoise_1step_gdiff(noisy_batch, torch.tensor(t), phi_ps) * (mask[:, t]).reshape(-1,1,1) + noisy_batch * (1 - mask[:, t]).reshape(-1,1,1)
+            x_t = self.denoise_1step_gdiff(noisy_batch, torch.tensor(t), phi_ps)
+            noisy_batch = x_t * (mask[:, t]).reshape(-1, 1, 1) + noisy_batch * (1 - mask[:, t]).reshape(-1, 1, 1)
         
         # noisy_batch = self.unnormalize(noisy_batch)
 

@@ -56,47 +56,54 @@ def sample_phi_prior(n, phi_min=-1.0, phi_max=1.0, norm_mode='compact'):
     phi = torch.rand(n) * (phi_max - phi_min) + phi_min
     return normalize_phi(phi)
 
-def log_prior_phi(phi, norm_mode):
+# def log_prior_phi(phi, norm_mode):
 
-    logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
-    for i in range(1, phi.shape[-1]):
-        logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
+#     logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
+#     for i in range(1, phi.shape[-1]):
+#         logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
     
+#     return logp
+
+
+# def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
+    
+#     logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
+#     for i in range(1, phi.shape[-1]):
+#         logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
+
+#     sigma_ = torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float())
+#     logp = logp.reshape(sigma_.shape)
+#     # print(logp, sigma_, logp.shape, sigma_.shape)
+#     logp += sigma_
+
+#     # print('log-prior: ', logp.shape)
+#     return logp
+
+def log_prior_phi(phi, norm_mode="compact"):
+    # phi is (b, 2)
+    in_bounds = torch.logical_and(phi >= 0.0, phi <= 1.0)  # (b, 2)
+    all_in_bounds = torch.all(in_bounds, dim=-1).float()   # (b,)
+    logp = torch.log(all_in_bounds + 1e-30)  # add epsilon to avoid log(0)
     return logp
 
-    # if norm_mode == "compact":
-    #     return torch.where((phi >= 0) & (phi <= 1), torch.zeros_like(phi), torch.full_like(phi, -float('inf')))
-    # elif norm_mode == "inf":
-    #     return -torch.log1p(phi ** 2)
-    # else:
-    #     return -torch.log(torch.tensor(phi_max - phi_min))
 
-def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
-    
-    logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
-    for i in range(1, phi.shape[-1]):
-        logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
+def log_prior_phi_sigma(phi, sigma, sigma_min=1e-2, sigma_max=1e2, norm_mode="compact"):
+    # phi: (b, 2), sigma: (b,)
+    in_bounds_phi = torch.logical_and(phi >= 0.0, phi <= 1.0)  # (b, 2)
+    valid_phi = torch.all(in_bounds_phi, dim=-1).float()       # (b,)
+    logp_phi = torch.log(valid_phi + 1e-30)                    # (b,)
 
-    sigma_ = torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float())
-    logp = logp.reshape(sigma_.shape)
-    # print(logp, sigma_, logp.shape, sigma_.shape)
-    logp += sigma_
+    in_bounds_sigma = torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float()  # (b,)
+    logp_sigma = torch.log(in_bounds_sigma + 1e-30)             # (b,)
 
-    # print('log-prior: ', logp.shape)
+    logp = logp_phi + logp_sigma
     return logp
-
 
 def log_likelihood_eps_phi(phi, eps, ps_model):
-    """
-    Log-likelihood without sigma, for 1D or 2D eps.
     
-    phi: (batch_size, dim)
-    eps: (batch_size, N) for 1D, or (batch_size, dim, H, W) for 2D
-    ps_model: callable that maps phi -> power spectrum of same shape as eps (except batch)
-    """
     ps = ps_model(phi)  # shape: same as eps (excluding batch)
-    
-    if eps.ndim == 2:  # 1D case: (B, dim, N)
+
+    if eps.ndim == 3:  # 1D case: (B, dim, N)
         eps_dim = eps.shape[-1]
         xf = torch.fft.fft(eps)
         term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
@@ -120,17 +127,10 @@ def log_likelihood_eps_phi(phi, eps, ps_model):
 
 
 def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model):
-    """
-    Log-likelihood with sigma scaling, for 1D or 2D eps.
     
-    phi: (batch_size, dim)
-    sigma: (batch_size,) or (batch_size, 1)
-    eps: (batch_size, N) or (batch_size, C, H, W)
-    ps_model: callable that maps phi -> power spectrum of same shape as eps (excluding batch)
-    """
     ps = ps_model(phi)
 
-    if eps.ndim == 2:  # 1D case
+    if eps.ndim == 3:  # 1D case
         eps_dim = eps.shape[-1]
         xf = torch.fft.fft(eps)
         sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # (B, 1)
@@ -320,7 +320,7 @@ def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=
         
         # print('accept-prob: ', accept_prob, accept_prob.shape, q.shape)
         
-        accept = torch.rand(q.shape) < accept_prob
+        accept = torch.rand(q.shape) < accept_prob.reshape(-1, 1)
         q[accept] = q_new[accept]
 
         if adapt and i <= n_adapt:
