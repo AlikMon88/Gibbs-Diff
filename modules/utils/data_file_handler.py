@@ -22,6 +22,8 @@ def tiny_imagenet_file_handler(source_path, return_path = True):
     if return_path:
         return train_image_path, test_image_path
 
+def cosmo_data_file_handler():
+    pass
 
 if __name__ == '__main__':
     print('running __data_file_handler.py__')
