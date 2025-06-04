@@ -4,6 +4,7 @@ import math
 import torch
 from autograd import grad
 import torch.nn as nn
+import torch.nn.functional as F
 
 sigma_min, sigma_max = 0.04, 0.4
 
@@ -17,67 +18,41 @@ def get_phi_all_bounds(phi_min=-1.0, phi_max = 1.0, sigma_min = 0.04, sigma_max 
     phi_max_all = torch.cat([phi_max, sigma_max])
     return phi_min_all, phi_max_all
 
-def get_noise_estimate(y, sigma_min, sigma_max):
+def get_noise_estimate_2d(y, sigma_min, sigma_max):
     y_std = y.std()
     sigma_est = 1.15 * y_std - 0.17  # heuristic from Imagenet
     sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
     return sigma_est.unsqueeze(0)
 
-## standardize = [-1, 1] -> [0, 1]
-def normalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
+def high_pass_filter(y, kernel_size=31):
+    # Create a moving average (low-pass) kernel
+    kernel = torch.ones(kernel_size) / kernel_size
+    kernel = kernel.to(y.device).unsqueeze(0).unsqueeze(0)  # (1, 1, K)
 
+    low_pass = F.conv1d(y, kernel, padding=kernel_size // 2)
+    high_pass = y - low_pass
+    return high_pass.squeeze()
+
+def get_noise_estimate_1d(y, sigma_min, sigma_max, kernel_size=31):
+    high_freq_part = high_pass_filter(y, kernel_size)
+    sigma_est = high_freq_part.std()
+    sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
+    return sigma_est.unsqueeze(0)
+
+## standardize = [-1, 1] -> [0, 1] ## for HMC-sampling
+def normalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
     ret = (phi - phi_min) / (phi_max - phi_min)
     return ret
 
-    # if mode == "compact":
-    #     return (phi - phi_min) / (phi_max - phi_min)
-    # elif mode == "inf":
-    #     compact = (phi - phi_min) / (phi_max - phi_min)
-    #     return torch.tan((compact - 0.5) * torch.pi)
-    # else:
-    #     return phi
-
 ## de-standardize = [0, 1] -> [-1, 1]
 def unnormalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
-
     ret = phi * (phi_max - phi_min) + phi_min
     return ret
 
-    # if mode == "compact":
-    #     return phi * (phi_max - phi_min) + phi_min
-    # elif mode == "inf":
-    #     compact = torch.atan(phi) / torch.pi + 0.5
-    #     return compact * (phi_max - phi_min) + phi_min
-    # else:
-    #     return phi
-
 def sample_phi_prior(n, phi_min=-1.0, phi_max=1.0, norm_mode='compact'):
-
     phi = torch.rand(n) * (phi_max - phi_min) + phi_min
     return normalize_phi(phi)
 
-# def log_prior_phi(phi, norm_mode):
-
-#     logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
-#     for i in range(1, phi.shape[-1]):
-#         logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
-    
-#     return logp
-
-
-# def log_prior_phi_sigma(phi, sigma, norm_mode="compact"): ## ~ returns 0
-    
-#     logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float())
-#     for i in range(1, phi.shape[-1]):
-#         logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
-
-#     sigma_ = torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float())
-#     logp = logp.reshape(sigma_.shape)
-#     # print(logp, sigma_, logp.shape, sigma_.shape)
-#     logp += sigma_
-
-#     # print('log-prior: ', logp.shape)
-#     return logp
 
 def log_prior_phi(phi, norm_mode="compact"):
     # phi is (b, 2)
@@ -293,7 +268,6 @@ class DualAveragingStepSize:
 def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, inv_mass_matrix=None, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
     
     q = phi_init.clone()
-    # samples = []
 
     batch_size, dim = q.shape
 
@@ -303,6 +277,7 @@ def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=
 
     step_size_adapter = DualAveragingStepSize(step_size)
 
+    accept_prob_list = []
     for i in range(1, chain_length + burnin_steps + 1):
         p = torch.randn_like(q)
         q_new, p_new = leapfrog(q, p, step_size, n_leapfrog_steps, log_prob_fn, log_grad, inv_mass_matrix)
@@ -316,23 +291,24 @@ def sample_hmc(log_prob_fn, log_grad, phi_init, step_size=0.1, n_leapfrog_steps=
         # print('Hamiltonian:')
         # print(H_old, H_new)
 
-        accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0))
+        accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0)).reshape(-1, 1)
+        accept_prob_list.append(accept_prob.mean(dim=0).item())
+
+        accept = torch.rand(q.shape) < accept_prob
         
-        # print('accept-prob: ', accept_prob, accept_prob.shape, q.shape)
-        
-        accept = torch.rand(q.shape) < accept_prob.reshape(-1, 1)
         q[accept] = q_new[accept]
 
         if adapt and i <= n_adapt:
             step_size = step_size_adapter.update(accept_prob.mean().item())
 
-        # samples.append(q.clone())
 
+    mean_accept_prob = np.mean(np.array(accept_prob_list), axis=0)
     # return torch.stack(samples[burnin_steps:], dim=1), step_size, inv_mass_matrix if adapt else torch.stack(samples[burnin_steps:], dim=1)
+
     if adapt:
-        return q, step_size, inv_mass_matrix
+        return q, step_size, inv_mass_matrix, mean_accept_prob
     else: 
-        return q
+        return q, mean_accept_prob
 
 if __name__ == '__main__':
 
