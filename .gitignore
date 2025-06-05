@@ -1,5 +1,6 @@
 gdiff-env/
 gdiff-env-2/
+gdiff-env-wsl/
 .env
 
 /modules/comp/KAIR
