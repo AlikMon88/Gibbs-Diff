@@ -21,8 +21,7 @@ from ...utils.helper import *
 from .unet_2d import *
 from ...utils.noise_create_2d import get_colored_noise_2d
 from ...utils.hmc import *
-from ...utils.hmc import sample_hmc
-from ...utils.hmc import get_phi_all_bounds
+from ...utils.hmc_v2 import *
 
 ## Absoulute Imports
 # from modules.utils.helper import *
@@ -180,6 +179,8 @@ class GibbsDiff2D(nn.Module):
             hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, \
             inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.n_adapt, phi_min_norm=None, phi_max_norm=None)
 
+        hmc_accept_list = []
+
         for i in range(n_it_gibbs + n_it_burnin):
 
             phi = phi_all[-1]  # (B*C, 2)
@@ -190,8 +191,8 @@ class GibbsDiff2D(nn.Module):
             # print()
 
             # Step 1: DDOM Posterior Sampling
-            t = self.get_closest_timestep(phi[:, 1])  # sigma values
-            x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
+            t = self.get_closest_timestep(phi[:, 1])  # sigma values | to find the closest-timestep : t-indexing
+            x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...) # phi for noise-params
             epsilon = (y - x)
             # print('epsilon:')
             # print(torch.mean(epsilon, dim=-1))

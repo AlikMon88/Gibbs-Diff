@@ -1,3 +1,5 @@
+# Assuming Unet2DCosmoGDiff is defined as per previous response
+# from .unet_2d_cosmo import Unet2DCosmoGDiff # Or however you import it
 import numpy as np
 
 import math
@@ -21,18 +23,9 @@ from ...utils.helper import *
 from .unet_2d import *
 from ...utils.noise_create_2d import get_colored_noise_2d
 from ...utils.hmc import *
-from ...utils.hmc import sample_hmc
-from ...utils.hmc import get_phi_all_bounds
+from ...utils.hmc_v2 import *
 
-## Absoulute Imports
-# from modules.utils.helper import *
-# from unet_2d import *
-# from modules.utils.noise_create_2d import get_colored_noise_2d
-# from modules.utils.hmc import *
-# from modules.utils.hmc import sample_hmc
-# from modules.utils.hmc import get_phi_all_bounds
-
-
+# Helper functions for noise schedule (can be kept from your original)
 def extract(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
@@ -45,10 +38,6 @@ def linear_beta_schedule(timesteps):
     return torch.linspace(beta_start, beta_end, timesteps, dtype = torch.float64)
 
 def cosine_beta_schedule(timesteps, s = 0.008):
-    """
-    cosine schedule
-    as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
-    """
     steps = timesteps + 1
     x = torch.linspace(0, timesteps, steps, dtype = torch.float64)
     alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
@@ -57,248 +46,412 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     return torch.clip(betas, 0, 0.999)
 
 
-class GibbsDiff2D(nn.Module):
+class GibbsDiff2D_cosmo(nn.Module):
     def __init__(
         self,
         model,
         *,
-        image_size,
-        num_timesteps=1000,
-        sampling_timesteps=None):
-
+        image_size_hw, # Tuple (H, W), e.g., (256, 256)
+        img_channels=1,
+        num_timesteps_ddpm=1000, # Timesteps for the DDPM noise schedule
+        sampling_timesteps_ddpm=None, # For DDIM-like acceleration if used
+        ddpm_beta_schedule='linear', # 'linear' or 'cosine'
+        # HMC specific parameters for Phi_CMB sampling
+        hmc_n_leapfrog_steps=10,
+        hmc_chain_length=1, # Number of HMC samples per Gibbs iteration
+        hmc_burnin_steps=0, # Burn-in for HMC *within* each Gibbs step (usually small or 0 after initial adaptation)
+        hmc_adapt_stepsize_iters = 50 # For initial HMC step size adaptation
+    ):
         super().__init__()
 
         self.model = model
-        self.device = model.device
-        self.num_timesteps = num_timesteps
-        self.image_size = image_size  # (H, W)
-        self.channels = 3
+        self.device = model.device # Assumes model is already on the correct device
+        self.num_timesteps_ddpm = num_timesteps_ddpm
+        self.image_size_hw = image_size_hw
+        self.img_channels = img_channels
 
-        self.beta_small = 0.1 / self.num_timesteps
-        self.beta_large = 20 / self.num_timesteps
-        self.timesteps_t = torch.arange(0, self.num_timesteps)
-        self.beta_t = self.beta_small + (self.timesteps_t / self.num_timesteps) * (self.beta_large - self.beta_small)
-        self.alpha_t = 1 - self.beta_t
-        self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0)
+        # Setup DDPM noise schedule
+        if ddpm_beta_schedule == 'linear':
+            beta_t_ddpm = linear_beta_schedule(num_timesteps_ddpm)
+        elif ddpm_beta_schedule == 'cosine':
+            beta_t_ddpm = cosine_beta_schedule(num_timesteps_ddpm)
+        else:
+            raise ValueError(f"Unknown beta schedule: {ddpm_beta_schedule}")
 
-        if not sampling_timesteps:
-            self.sampling_timesteps = self.num_timesteps
+        alpha_t_ddpm = 1. - beta_t_ddpm
+        self.alpha_bar_t_ddpm = torch.cumprod(alpha_t_ddpm, axis=0).to(self.device) # cumulative products of alphas
+        self.beta_t_ddpm = beta_t_ddpm.to(self.device)
+        self.alpha_t_ddpm = alpha_t_ddpm.to(self.device)
 
-    def get_gdiff_loss(self, batch, ts, phi_ps=None):
-        # phi should be a tensor of the size of the batch_size, we want a phi different for each batch element
-        if isinstance(batch, list):
-            batch = batch[0]  # batch is a list (e.g. ImageFolder)
+        # For DDIM sampling if used (not strictly necessary for basic ancestral sampling)
+        self.sampling_timesteps_ddpm = sampling_timesteps_ddpm if sampling_timesteps_ddpm is not None else num_timesteps_ddpm
+        # assert self.sampling_timesteps_ddpm <= num_timesteps_ddpm # not used in current denoise_1step
+        
+        # HMC parameters (can be tuned)
+        self.hmc_n_leapfrog_steps = hmc_n_leapfrog_steps
+        self.hmc_chain_length = hmc_chain_length
+        self.hmc_burnin_steps = hmc_burnin_steps # Burn-in for HMC adaptation *within* a Gibbs iter
+        self.hmc_adapt_stepsize_iters = hmc_adapt_stepsize_iters # for the very first HMC call
 
-        bs = batch.shape[0]
-        if phi_ps is None:
-            # sample phi_ps between -1 and 1 | shape (batch_size, 1)
-            phi_ps = torch.rand(bs, 1, device=self.device) * 2 - 1
+        # Placeholder for lmap (initialize properly before running Gibbs)
+        self.lmap_fourier = None # Must be set externally or via a method
 
-        if isinstance(phi_ps, float) or isinstance(phi_ps, int):
-            phi_ps = phi_ps * torch.ones(bs, 1).to(self.device)
+    def set_lmap_fourier(self, lmap_tensor):
+        self.lmap_fourier = lmap_tensor.to(self.device)
 
-        # epsilons: colored noise for each image in the batch
-        epsilons, _ = get_colored_noise_2d(batch.shape, phi_ps, device=self.device)  # Shape: (B, C, H, W)
+    def get_gdiff_loss(self, clean_dust_batch, # x_0 (clean dust maps)
+                       phi_cmb_batch,          # Corresponding true Phi_CMB for these maps
+                       ddpm_timesteps):        # Sampled DDPM timesteps t
+        """
+        Calculates the diffusion model training loss.
+        clean_dust_batch: [B, C, H, W]
+        phi_cmb_batch: [B, 3] tensor of (sigma_CMB, H0, ombh2)
+        ddpm_timesteps: [B] tensor of DDPM timesteps
+        """
+        batch_size = clean_dust_batch.shape[0]
+        
+        # 1. Get alpha_bar_t for the sampled DDPM timesteps
+        # Squeeze ddpm_timesteps if it's [B,1]
+        a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
 
-        a_hat = self.alpha_bar_t[ts.squeeze(-1).int().cpu()].reshape(-1, 1, 1, 1).to(self.device)
-        noise_imgs = torch.sqrt(a_hat) * batch + torch.sqrt(1 - a_hat) * epsilons  # x_t
+        # 2. Sample standard Gaussian noise for the DDPM forward process
+        ddpm_noise_eps = torch.randn_like(clean_dust_batch, device=self.device)
 
-        e_hat = self.model(noise_imgs, ts, phi_ps=phi_ps)  # predict noise
-        loss = nn.functional.mse_loss(e_hat, epsilons)
+        # 3. Create z_t (DDPM noised dust map)
+        # x_t = sqrt(alpha_hat) * x_0 + sqrt(1-alpha_hat) * eps
+        z_t = torch.sqrt(a_bar_t) * clean_dust_batch + torch.sqrt(1. - a_bar_t) * ddpm_noise_eps
 
+        # 4. Get model prediction (predicts the DDPM noise eps)
+        # The model is conditioned on ddpm_timesteps and the true phi_cmb_batch
+        predicted_ddpm_noise = self.model(z_t, ddpm_timesteps.float(), phi_cmb=phi_cmb_batch)
+
+        # 5. Calculate MSE loss
+        loss = nn.functional.mse_loss(predicted_ddpm_noise, ddpm_noise_eps)
         return loss
 
-    def forward(self, img, *args, **kwargs):
-        b, c, h, w = img.shape
-        assert (c, h, w) == self.image_size, f'image size must be {self.image_size}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=img.device).long()
-        return self.get_gdiff_loss(img, t, *args, **kwargs)
-
-    def get_closest_timestep(self, noise_level, ret_sigma=False):
+    def forward(self, clean_dust_img, phi_cmb_params, *args, **kwargs): # For training wrapper
         """
-        Returns the closest timestep to the given noise level. If ret_sigma is True, also returns the noise level corresponding to the closest timestep.
+        A forward pass suitable for training.
+        clean_dust_img: Batch of clean dust maps [B, C, H, W]
+        phi_cmb_params: Batch of corresponding true CMB parameters [B, 3]
         """
-        alpha_bar_t = self.alpha_bar_t.to(noise_level.device)
-        all_noise_levels = torch.sqrt((1-alpha_bar_t)/alpha_bar_t).reshape(-1, 1).repeat(1, noise_level.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
+        b, c, h, w = clean_dust_img.shape
+        # assert (c, h, w) == (self.img_channels, *self.image_size_hw), f'Image size mismatch'
         
-        closest_timestep = torch.argmin(torch.abs(all_noise_levels - noise_level), dim=0)
-
-        if ret_sigma:
-            return closest_timestep, all_noise_levels[closest_timestep, 0]
-        else:
-            return closest_timestep
-    
-    ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
-    ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False, sampler_v2=False):
-
-        device = self.model.device
-
-        shape_ = yt.shape[1:]
-        # print('shape: ', shape_)
-
-        ps_model = ColoredPowerSpectrum2D(shape=shape_, device=device)
+        # Sample random DDPM timesteps for this batch
+        t_ddpm = torch.randint(0, self.num_timesteps_ddpm, (b,), device=self.device).long()
         
-        phi_max = 1.0
-        phi_min = -phi_max
+        return self.get_gdiff_loss(clean_dust_img, phi_cmb_params, t_ddpm)
 
-        batch_size = y.shape[0]
-        chains = num_chains_per_sample
-        total_chains = batch_size * chains
-
-        # Repeat inputs for each chain
-        y = y.repeat_interleave(chains, dim=0)     # (B * C, ...)
-        yt = yt.repeat_interleave(chains, dim=0)   # (B * C, ...)
-        # print(y.shape, yt.shape)
-
-        # Initialize phi and sigma
-        phi_init = sample_phi_prior(total_chains).unsqueeze(1)  # (B*C, 1)
-        sigma_init = get_noise_estimate_2d(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)  # (B*C, 1)
-    
-        phi_init_all = torch.cat([phi_init, sigma_init], dim=1)  # (B*C, 2)
-        # print('phi_init: ', phi_init_all, phi_init_all.shape)
-        phi_all = [phi_init_all]
-
-        phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device)
-
-        x_all = []
-        step_size = None
-        inv_mass_matrix = None
-
-        ##pre-filling
-        ## prior(phi)
-        log_prior = lambda phi: log_prior_phi_sigma(phi[:, 0], phi[:, 1])
-        ## log-likelihood(eps|phi) 
-        log_likelihood = lambda phi, eps: log_likelihood_eps_phi_sigma(phi[:, 0], phi[:, 1], eps, ps_model)
-
-        ## HMC-Sampler
-        if sampler_v2:
-            hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc_v2(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, \
-            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.n_adapt, phi_min_norm=None, phi_max_norm=None) 
-
-        else:
-            hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, \
-            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.n_adapt, phi_min_norm=None, phi_max_norm=None)
-
-        for i in range(n_it_gibbs + n_it_burnin):
-
-            phi = phi_all[-1]  # (B*C, 2)
-
-            # print()
-            # print('UPDATED-PHI: ', phi)
-            # print(phi.shape)
-            # print()
-
-            # Step 1: DDOM Posterior Sampling
-            t = self.get_closest_timestep(phi[:, 1])  # sigma values
-            x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
-            epsilon = (y - x)
-            # print('epsilon:')
-            # print(torch.mean(epsilon, dim=-1))
-
-            # Step 2: HMC Sampling
-            def log_posterior(phi, epsilon):
-                return log_likelihood(phi, epsilon) + log_prior(phi)
-
-            ## pre-filling
-            log_prob_fn = lambda phi: log_posterior(phi, epsilon)
-
-            def gradient_log_prob(phi):
-
-                phi_clone = phi.clone().requires_grad_(True)
-                logp = log_posterior(phi_clone, epsilon)
-                # print('logp:')
-                # print(type(logp), logp.shape, logp)
-                # print('logp.requires_grad:', logp.requires_grad)
-                # print('logp.grad_fn:', logp.grad_fn)
-                grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
-                return grad_phi
-
-            if i == 0:
-                # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
-                phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.1, inv_mass_matrix=None, adapt=True)
-           
-            else:
-                phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
-                phi_new, hmc_accept_mean = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
-                hmc_accept_list.append(hmc_accept_mean)
-
-            phi_all.append(phi_new)
-            x_all.append(x)
-
-        ## After phi distrib convergence
-        print('HMC-last-state-Acceptance-Probability: ', hmc_accept_mean)
-        print('HMC-mean-accept-proba: ', np.mean(np.array(hmc_accept_list), axis=0))
-
-        if return_chains:
-            ## returns the entire gibbs chain
-            return torch.stack(phi_all, dim=1).detach().cpu(), torch.stack(x_all, dim=1).detach().cpu()  # (B*C, steps, ...)
-        else:
-            ## returns the last gibbs state
-            return phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
-
-    ## there are 2 MCMC (HMC and Gibbs) chains we talk about the gibbs chain ofc 
-    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False, sampler_v2=False): ## last avg_pmean positions
+    def get_closest_ddpm_timestep_from_sigma_cmb(self, sigma_cmb_values): # sigma_cmb_values is [B_chains]
+        """
+        Finds the DDPM timestep t_eff whose DDPM noise level sigma_t_ddpm
+        is closest to the provided physical sigma_CMB values.
+        This is based on your interpretation for starting ancestral sampling.
+        """
+        # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
+        # Let's use sigma_t^2 = 1 - alpha_bar_t (variance of noise added to x_0 to get x_t if x_0 has unit variance)
+        # Or, if model predicts epsilon, then noise added to x_0 is sqrt(1-a_bar_t)*epsilon.
+        # If x_t = sqrt(a_bar_t)x_0 + sqrt(1-a_bar_t)eps, then var(x_t|x_0) = 1-a_bar_t
+        # So, effective sigma_ddpm = sqrt(1 - alpha_bar_t_ddpm)
         
-        '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
-
-        phi_all, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True, sampler_v2=sampler_v2)
-        # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
-        # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
-
-        phi_all_posterior = phi_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, 2)
-        x_denoised_posterior = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, self.channels, self.image_size[0], self.image_size[-1])
-
-        x_denoised_pmean = x_denoised_posterior.mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
-        phi_all_mean = phi_all_posterior.mean(dim=(0, 2))
-
-        if not return_post:
-            return phi_all_mean, x_denoised_pmean
-        else:
-            return phi_all_posterior, x_denoised_posterior
-
+        # The sigma_CMB is an amplitude, its square is related to power/variance.
+        # This matching is heuristic. A common choice for "noise level" sigma in DDPM is sqrt(1-alpha_bar)/sqrt(alpha_bar)
+        # Or simply sqrt(1-alpha_bar) if thinking about variance of added noise to x0.
+        # Let's use the one from your original code: sqrt((1-alpha_bar_t)/alpha_bar_t)
+        
+        ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
+        
+        # sigma_cmb_values is [B_chains], ddpm_noise_levels is [T_ddpm]
+        # We want to find for each sigma_cmb_value, the closest ddpm_noise_level
+        # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
+        diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
+        closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
+        
+        return closest_ddpm_t_indices # These are the t_eff to start DDPM from
 
     @torch.no_grad()
-    def denoise_1step_gdiff(self, x, t, phi_ps=None):
-        # phi should be a tensor of the size of the batch_size, we want a different phi for each batch element
-        if phi_ps is None:
-            phi_ps = torch.zeros(x.shape[0], 1, device=self.device).float()
+    def denoise_1step_ancestral(self, z_t, t_ddpm, phi_cmb_cond): # t_ddpm is a scalar tensor
+        """ Performs one step of DDPM ancestral sampling. """
+        # Ensure t_ddpm is correctly shaped for model and indexing
+        t_ddpm_batch = t_ddpm.repeat(z_t.shape[0]) # If z_t is batched
 
-        if isinstance(phi_ps, int) or isinstance(phi_ps, float):
-            phi_ps = phi_ps * torch.ones(x.shape[0], 1, device=self.device).float()
-        else:
-            phi_ps = phi_ps.to(self.device).float()
+        predicted_ddpm_noise = self.model(z_t, t_ddpm_batch.float(), phi_cmb=phi_cmb_cond)
+        
+        alpha_t = self.alpha_t_ddpm[t_ddpm]
+        alpha_bar_t = self.alpha_bar_t_ddpm[t_ddpm]
+        
+        # Denoise from z_t to predicted x_0
+        # x_0_pred = (z_t - torch.sqrt(1. - alpha_bar_t) * predicted_ddpm_noise) / torch.sqrt(alpha_bar_t)
+        # x_0_pred = torch.clamp(x_0_pred, -1., 1.) # Optional clamping if data was in [-1,1]
 
-        with torch.no_grad():
-            if t > 1:
-                z, _ = get_colored_noise_2d(x.shape, phi_ps, device=self.device)
-            else:
-                z = 0
-
-            t_ch = t.view(1).repeat(x.shape[0],)
-            e_hat = self.model(x, t_ch, phi_ps=phi_ps)
-            pre_scale = 1 / math.sqrt(self.alpha_t[t])
-            e_scale = self.beta_t[t] / math.sqrt(1 - self.alpha_bar_t[t])
-            post_sigma = math.sqrt(self.beta_t[t]) * z
-            x = pre_scale * (x - e_scale * e_hat) + post_sigma
-            return x
+        # Standard DDPM sampling step (from Ho et al. 2020, Eq. 11 for x_t-1 from x_t)
+        # x_{t-1} = 1/sqrt(alpha_t) * (x_t - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_theta) + sigma_t * z
+        coeff1 = 1.0 / torch.sqrt(alpha_t)
+        coeff2 = (1.0 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)
+        mean_prev_t = coeff1 * (z_t - coeff2 * predicted_ddpm_noise)
+        
+        variance_t = self.beta_t_ddpm[t_ddpm] # sigma_t^2 = beta_t
+        
+        noise_for_prev_step = torch.randn_like(z_t) if t_ddpm > 0 else torch.zeros_like(z_t)
+        z_prev_t = mean_prev_t + torch.sqrt(variance_t) * noise_for_prev_step
+        
+        return z_prev_t
 
     @torch.no_grad()
-    def denoise_samples_batch_time(self, noisy_batch, timesteps, batch_origin=None, return_sample=False, phi_ps=None):
-        max_timesteps = torch.max(timesteps)
-        mask = torch.ones(noisy_batch.shape[0], max_timesteps + 1).to(self.device)
+    def sample_dust_posterior(self, y_observed_cmb_corrupted, # The actual observation [B_orig,C,H,W]
+                              phi_cmb_current_estimate,     # Current Phi_CMB [B_chains, 3]
+                              num_ddpm_ancestral_steps=None): # How many DDPM steps from t_eff
+        """
+        Samples a dust map x_k ~ q(x | y_observed, Phi_CMB_current)
+        using DDPM ancestral sampling, starting from an effective t_eff.
+        """
+        # y_observed_cmb_corrupted is the "true" observation y = x_dust + eps_CMB
+        # For DDPM, the input z_t should be x_0 + artificial_ddpm_noise.
+        # Here, y_observed_cmb_corrupted *is* effectively our starting point,
+        # considered to be at some t_eff.
+        
+        sigma_cmb_from_phi = phi_cmb_current_estimate[:, 0] # Extract current sigma_CMB estimate
+        
+        # Find the DDPM timestep t_eff that "matches" the current sigma_CMB
+        t_eff_indices = self.get_closest_ddpm_timestep_from_sigma_cmb(sigma_cmb_from_phi) # [B_chains]
+        
+        # The starting "noisy image" for DDPM is the observation y.
+        # If y_observed_cmb_corrupted is [B_orig, C, H, W] and phi_cmb_current_estimate is [B_chains, 3],
+        # and B_chains = B_orig * num_chains_per_sample, we need to align them.
+        # Typically, y_observed will already be repeated for each chain.
+        z_t_eff = y_observed_cmb_corrupted.clone() # Shape [B_chains, C, H, W]
 
-        for i in range(noisy_batch.shape[0]):
-            mask[i, timesteps[i]+1:] = 0
+        # Determine the number of DDPM steps for each chain
+        # This can be fixed (e.g., all run for max(t_eff_indices) steps)
+        # or variable (each chain runs for its own t_eff_i steps).
+        # For simplicity, let's make all chains run up to max(t_eff_indices)
+        # and apply updates conditionally.
+        # Or, more simply for ancestral sampling: each chain starts at its t_eff_i
+        # and iterates down to 0. The number of steps will vary.
+        
+        # The paper's code (natural images) uses "mask" to handle variable timesteps in batch.
+        # Let's iterate for each chain individually for clarity here, then batch it.
+        # This is inefficient but illustrates the per-chain logic.
+        # A batched version would run all chains for max(t_eff_indices) steps
+        # and use a mask to apply updates only for t <= t_eff_i for chain i.
+        
+        # Simpler: Loop for the maximum t_eff found across the batch.
+        # Inside the loop, only update samples whose t_eff_i is >= current t.
+        
+        max_t_eff = torch.max(t_eff_indices).item()
+        current_z = z_t_eff
 
-        for t in range(max_timesteps, 0, -1):
-            noisy_batch = self.denoise_1step_gdiff(noisy_batch, torch.tensor(t), phi_ps) * (mask[:, t]).reshape(-1, 1, 1, 1) + \
-                          noisy_batch * (1 - mask[:, t]).reshape(-1, 1, 1, 1)
+        for t_val_ddpm in range(max_t_eff, -1, -1): # from max_t_eff down to 0
+            t_tensor = torch.tensor(t_val_ddpm, device=self.device)
+            
+            # Create a mask for which chains are still active at this t_val_ddpm
+            active_mask = (t_eff_indices >= t_val_ddpm).float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            
+            if torch.sum(active_mask) > 0: # If any chain is active
+                z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate)
+                current_z = active_mask * z_prev_t + (1.0 - active_mask) * current_z # Update only active chains
+            
+        return current_z # This is the sampled x_k (dust map)
 
-        if batch_origin is None:
-            return noisy_batch
+    def run_gibbs_sampler(self,
+                                y_observed, # Single observation or batch [B_orig, C, H, W]
+                                num_chains_per_gibbs_sample, # Number of parallel MCMC chains for Phi_CMB
+                                n_it_gibbs=10,
+                                n_it_burnin_gibbs=2,
+                                initial_phi_cmb=None, # Optional starting point for Phi_CMB [B_orig*N_chains, 3]
+                                hmc_step_size_initial=0.01, # Initial HMC step size
+                                hmc_inv_mass_matrix_initial=None, # Initial HMC inv mass matrix
+                                adapt_hmc_during_burnin=True,
+                                return_chains_history=False):
+        """
+        Runs the Gibbs sampler for the cosmology problem.
+        y_observed: The input mixed map (dust + CMB). Shape [B_orig, C, H, W]
+        """
+        if self.lmap_fourier is None:
+            raise ValueError("lmap_fourier must be set before running Gibbs sampler. Call set_lmap_fourier().")
+
+        device = self.device
+        original_batch_size = y_observed.shape[0]
+        total_chains = original_batch_size * num_chains_per_gibbs_sample
+
+        # Repeat y_observed for each chain
+        y_repeated = y_observed.repeat_interleave(num_chains_per_gibbs_sample, dim=0).to(device) # [B_total, C,H,W]
+
+        # Initialize Phi_CMB = (sigma_CMB, H0, ombh2)
+        if initial_phi_cmb is not None:
+            phi_cmb_current = initial_phi_cmb.to(device)
+            assert phi_cmb_current.shape == (total_chains, 3)
         else:
-            if return_sample:
-                return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), noisy_batch
+            # Sample from prior or a smarter initialization
+            s_init = torch.rand(total_chains, 1, device=device) * (SIGMA_CMB_PRIOR_MAX - SIGMA_CMB_PRIOR_MIN) + SIGMA_CMB_PRIOR_MIN
+            h_init = torch.rand(total_chains, 1, device=device) * (H0_PRIOR_MAX_COSMO - H0_PRIOR_MIN_COSMO) + H0_PRIOR_MIN_COSMO
+            o_init = torch.rand(total_chains, 1, device=device) * (OMBH2_PRIOR_MIN_COSMO - OMBH2_PRIOR_MIN_COSMO) + OMBH2_PRIOR_MIN_COSMO
+            phi_cmb_current = torch.cat([s_init, h_init, o_init], dim=1) # [B_total, 3]
+
+        phi_cmb_history = []
+        x_dust_history = []
+        
+        # HMC parameters (will be adapted if adapt_hmc_during_burnin is True)
+        current_hmc_step_size = hmc_step_size_initial
+        current_hmc_inv_mass_matrix = hmc_inv_mass_matrix_initial
+        if current_hmc_inv_mass_matrix is None: # Default to identity if not provided
+             current_hmc_inv_mass_matrix = torch.eye(3, device=device).unsqueeze(0).repeat(total_chains,1,1) # Diagonal or per chain
+
+        phi_min_bounds, phi_max_bounds = get_phi_cmb_all_bounds(device=device)
+
+
+        for gibbs_iter in tqdm(range(n_it_gibbs + n_it_burnin_gibbs), desc="Gibbs Iterations"):
+            # --- Step 1: Sample Dust Map x_k ~ q(x | y, Phi_CMB_{k-1}) ---
+            # This uses the DDPM ancestral sampling starting from t_eff based on sigma_CMB
+            # The y_repeated is the observation.
+            sampled_x_dust = self.sample_dust_posterior(
+                y_observed_cmb_corrupted=y_repeated,
+                phi_cmb_current_estimate=phi_cmb_current
+            ) # Returns [B_total, C, H, W]
+
+            # --- Step 2: Estimate CMB residual epsilon_{k-1} = y - x_k ---
+            estimated_cmb_residual = y_repeated - sampled_x_dust # [B_total, C, H, W]
+
+            # --- Step 3: Sample Phi_CMB_k ~ q(Phi | epsilon_{k-1}) using HMC ---
+            def hmc_log_posterior_fn(phi_cmb_trial): # phi_cmb_trial is [B_total, 3]
+                log_p = log_prior_phi_cmb(phi_cmb_trial)
+                # Only compute likelihood for valid priors to save computation
+                valid_prior_mask = ~torch.isinf(log_p)
+                if torch.any(valid_prior_mask):
+                    log_l = torch.zeros_like(log_p)
+                    log_l[valid_prior_mask] = log_likelihood_cmb_phi(
+                        phi_cmb_trial[valid_prior_mask],
+                        estimated_cmb_residual[valid_prior_mask], # Pass only relevant residuals
+                        self.lmap_fourier
+                    )
+                    log_p = log_p + log_l
+                return log_p
+
+            def hmc_gradient_log_posterior_fn(phi_cmb_trial_grad):
+                phi_cmb_clone = phi_cmb_trial_grad.clone().requires_grad_(True)
+                logp_val = hmc_log_posterior_fn(phi_cmb_clone)
+                
+                # Sum is needed if logp_val is not scalar per batch item, but it should be.
+                # Handle -inf by setting grad to 0 for those, or use a large negative number.
+                valid_grads_mask = ~torch.isinf(logp_val)
+                grad_phi = torch.zeros_like(phi_cmb_clone)
+
+                if torch.any(valid_grads_mask):
+                    # Compute gradients only for valid logp values
+                    # Need to sum valid logp values to get a scalar for autograd, then un-sum grads.
+                    # This is tricky for batched autograd if logp_val is not all valid.
+                    # A common way is to compute grads for each item if autograd over batch is problematic.
+                    # For now, assume autograd handles batching correctly or sum and scale.
+                    
+                    # Simpler: if any logp_val is -inf, the gradient for that chain is effectively zero for other params
+                    # or should be handled by boundary conditions in HMC. Let's try direct grad.
+                    # If logp_val contains -inf, autograd might error or give NaNs.
+                    # We should ensure inputs to log_likelihood are only for valid priors.
+                    
+                    # This is a common pain point with HMC and hard boundaries.
+                    # The log_posterior_fn already returns -inf.
+                    # HMC should ideally handle this by rejecting steps outside bounds.
+                    
+                    # Compute grad only for elements where logp_val is finite
+                    if torch.any(valid_grads_mask):
+                        # This is the tricky part with batched autograd and conditional computation.
+                        # One way: loop (inefficient) or use more advanced autograd tricks.
+                        # For now, let's assume our HMC handles boundary rejections.
+                        # The HMC log_prob_fn will return -inf for out-of-bounds, leading to rejection.
+                        # The gradient is only "needed" for points where log_prob is finite.
+                        grad_phi[valid_grads_mask] = torch.autograd.grad(
+                            outputs=logp_val[valid_grads_mask].sum(), # Sum to make scalar for grad
+                            inputs=phi_cmb_clone, # Grad w.r.t. all inputs
+                            create_graph=False, # For HMC, no higher order derivs needed
+                            allow_unused=True # If some inputs don't affect output
+                        )[0][valid_grads_mask] # Extract grad for valid inputs
+
+                return grad_phi.detach() # Detach as HMC doesn't need graph for phi_new
+
+            # Determine if HMC step size adaptation is needed
+            adapt_this_hmc_call = False
+            current_n_adapt_hmc = 0
+            if adapt_hmc_during_burnin and gibbs_iter < n_it_burnin_gibbs : # Adapt during Gibbs burn-in
+                 adapt_this_hmc_call = True
+                 current_n_adapt_hmc = self.hmc_adapt_stepsize_iters // n_it_burnin_gibbs # Distribute adaptation
+                 if gibbs_iter == 0: current_n_adapt_hmc = self.hmc_adapt_stepsize_iters # Full adapt on first iter
+
+            # Run HMC (using your sample_hmc_v2 or similar)
+            # We need to ensure sample_hmc_v2 can take batched phi_init, step_size, inv_mass_matrix
+            # and that log_prob_fn and log_grad handle batches.
+            phi_cmb_new, hmc_step_size_new, hmc_inv_mass_new, _ = sample_hmc_v2(
+                log_prob_fn=hmc_log_posterior_fn,
+                log_grad_fn=hmc_gradient_log_posterior_fn,
+                phi_init=phi_cmb_current.detach(), # Start HMC from current Phi_CMB
+                mass_matrix_input=None if current_hmc_inv_mass_matrix is None else torch.linalg.inv(current_hmc_inv_mass_matrix.mean(0)).unsqueeze(0).repeat(total_chains,1,1), # HMC_v2 takes M
+                step_size=current_hmc_step_size,
+                n_leapfrog_steps=self.hmc_n_leapfrog_steps,
+                chain_length=self.hmc_chain_length, # Produce 1 sample per Gibbs iter
+                burnin_steps=self.hmc_burnin_steps,  # HMC internal burn-in (usually 0 after initial adaptation)
+                adapt=adapt_this_hmc_call,
+                n_adapt=current_n_adapt_hmc,
+                phi_min_norm=phi_min_bounds, # Pass bounds to HMC
+                phi_max_norm=phi_max_bounds
+            )
+            # sample_hmc_v2 returns the last sample.
+            # If chain_length > 1, phi_cmb_new would be [B_total, chain_length_hmc, 3]
+            # We want the last sample from the HMC chain.
+            if phi_cmb_new.ndim == 3 and phi_cmb_new.shape[1] == self.hmc_chain_length:
+                phi_cmb_current = phi_cmb_new[:, -1, :].detach() # Take last HMC sample
+            elif phi_cmb_new.ndim == 2: # if chain_length was 1
+                phi_cmb_current = phi_cmb_new.detach()
             else:
-                return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), None
+                raise ValueError("Unexpected shape from HMC sampler for phi_cmb_new")
+
+            # Update HMC step size and inv mass matrix if they were adapted
+            if adapt_this_hmc_call:
+                current_hmc_step_size = hmc_step_size_new
+                current_hmc_inv_mass_matrix = hmc_inv_mass_new # This is M_inv from hmc_v2 if M was adapted
+
+            # Store results if past Gibbs burn-in
+            if gibbs_iter >= n_it_burnin_gibbs:
+                phi_cmb_history.append(phi_cmb_current.reshape(original_batch_size, num_chains_per_gibbs_sample, 3))
+                x_dust_history.append(sampled_x_dust.reshape(original_batch_size, num_chains_per_gibbs_sample, self.img_channels, *self.image_size_hw))
+
+        if not phi_cmb_history: # If no samples collected (e.g. n_it_gibbs was 0)
+            # Return current state as the only sample
+             phi_cmb_history.append(phi_cmb_current.reshape(original_batch_size, num_chains_per_gibbs_sample, 3))
+             x_dust_history.append(sampled_x_dust.reshape(original_batch_size, num_chains_per_gibbs_sample, self.img_channels, *self.image_size_hw))
+
+
+        phi_cmb_out = torch.stack(phi_cmb_history, dim=2).detach().cpu() # [B_orig, N_chains, N_gibbs_samples, 3]
+        x_dust_out = torch.stack(x_dust_history, dim=2).detach().cpu()   # [B_orig, N_chains, N_gibbs_samples, C,H,W]
+
+        if return_chains_history:
+            return phi_cmb_out, x_dust_out
+        else:
+            # Return the mean of the chains after burn-in (posterior mean estimate)
+            return phi_cmb_out.mean(dim=(1,2)), x_dust_out.mean(dim=(1,2))
+
+
+    def blind_posterior_mean(self, y_observed, num_chains_per_gibbs_sample=5,
+                                   n_it_gibbs=10, n_it_burnin_gibbs=5,
+                                   return_full_posterior_chains=False, **hmc_kwargs):
+        """
+        Performs blind denoising for cosmology to get posterior mean estimates.
+        y_observed: [B, C, H, W]
+        """
+        phi_chains, x_chains = self.run_gibbs_sampler(
+            y_observed,
+            num_chains_per_gibbs_sample=num_chains_per_gibbs_sample,
+            n_it_gibbs=n_it_gibbs,
+            n_it_burnin_gibbs=n_it_burnin_gibbs,
+            return_chains_history=True, # Get all history for averaging
+            **hmc_kwargs
+        )
+        # phi_chains: [B_orig, N_chains_gibbs, N_gibbs_samples, 3]
+        # x_chains:   [B_orig, N_chains_gibbs, N_gibbs_samples, C, H, W]
+
+        if return_full_posterior_chains:
+            return phi_chains, x_chains
+        else:
+            # Posterior mean over chains and Gibbs samples
+            phi_posterior_mean = phi_chains.mean(dim=(1, 2)) # Mean over N_chains_gibbs and N_gibbs_samples
+            x_dust_posterior_mean = x_chains.mean(dim=(1, 2))
+            return phi_posterior_mean, x_dust_posterior_mean
