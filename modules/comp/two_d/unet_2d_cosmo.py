@@ -83,34 +83,35 @@ class SelfAttention2D(nn.Module):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
-        hidden_dim = dim_head * heads
+        self.hidden_dim = dim_head * heads
+        self.dim_head = dim_head
 
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, kernel_size=1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, kernel_size=1)
+        self.to_qkv = nn.Conv2d(dim, self.hidden_dim * 3, kernel_size=1, bias=False)
+        self.to_out = nn.Conv2d(self.hidden_dim, dim, kernel_size=1)
 
     def forward(self, x):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x).chunk(3, dim=1) # q, k, v each with hidden_dim channels
         
-        q, k, v = map(lambda t: t.reshape(b, self.heads, dim_head, h * w), qkv)
+        q, k, v = map(lambda t: t.reshape(b, self.heads, self.dim_head, h * w), qkv)
 
         q = q * self.scale
         sim = torch.einsum('b h d n, b h d m -> b h n m', q, k) # Corrected einsum
         attn = sim.softmax(dim=-1)
 
         out = torch.einsum('b h n m, b h d m -> b h d n', attn, v) # Corrected einsum
-        out = out.reshape(b, hidden_dim, h, w)
+        out = out.reshape(b, self.hidden_dim, h, w)
         return self.to_out(out)
 
 class SinusoidalTimeEmbedding(nn.Module): # Renamed for clarity
     """ Sinusoidal time embedding """
-    def __init__(self, dim): # dim is the output embedding dimension
+    def __init__(self, channel): # t-indexing along depth/channel dimension
         super().__init__()
-        self.dim = dim
+        self.channel = channel
 
     def forward(self, t): # t is a 1D tensor of timesteps
         device = t.device
-        half_dim = self.dim // 2
+        half_dim = self.channel // 2
         embeddings = math.log(10000) / (half_dim - 1)
         embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
         embeddings = t[:, None] * embeddings[None, :] # (batch_size, 1) * (1, half_dim)
@@ -129,7 +130,9 @@ class PhiEmbeddingCosmo(nn.Module): # Renamed for clarity and specific use
         self.embedding_layer = nn.Sequential(
             nn.Linear(input_phi_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, output_emb_dim) # Output a fixed embedding size
+            nn.Linear(hidden_dim, hidden_dim), # Output a fixed embedding size
+            nn.SiLU(),
+            nn.Linear(hidden_dim, output_emb_dim)
             # No SiLU after the last linear layer if this embedding is directly added or processed by another MLP.
         )
 
@@ -150,10 +153,8 @@ class Unet2DGDiff_cosmo(nn.Module): # Renamed class
     def __init__(
         self,
         dim,                # Base dimension for channels
-        img_channels=1,       # Number of channels in the input image (e.g., 1 for grayscale dust)
-        time_embed_dim=256, # Dimension for sinusoidal time embedding
-        phi_input_dim=3,    # Input dimension for Phi_CMB (sigma, H0, ombh2)
-        phi_embed_dim=256,  # Output dimension of the PhiEmbeddingCosmo layer
+        channels=1,       # Number of channels in the input image (e.g., 1 for grayscale dust)
+        phi_input_dim=2,    # Input dimension for Phi_CMB (H0, ombh2)
         dropout=0.1,        # Dropout rate
         attn_dim_head=32,
         attn_heads=4,
@@ -162,239 +163,205 @@ class Unet2DGDiff_cosmo(nn.Module): # Renamed class
         super().__init__()
 
         self.dim = dim
-        self.img_channels = img_channels
+        self.img_channels = channels
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Channel dimensions for U-Net stages
         self.dims = [dim, dim * 2, dim * 4, dim * 8] # Example: 64, 128, 256, 512
-        # If you need deeper, add dim * 16. Current code uses up to dim * 8 then bottleneck
-        # Let's match your original channel progression nc_1 to nc_5
-        # nc_1=dim, nc_2=dim*2, nc_3=dim*4, nc_4=dim*8
-        # Bottleneck uses nc_4 (dim*8), then up_blocks reduce channels.
-        # Paper says "bottleneck of size 32x32 or 16x16" - this refers to spatial size.
-        # "Each ResBlock: 3 convolutions, GroupNorm, SiLU..." - your BlockGDiff2D has 1 conv.
-        # ResnetBlockGDiff2D has 2 BlockGDiff2D.
         
-        # We'll use phi_embed_dim as the dimension of the output from PhiEmbeddingCosmo,
-        # and this will be fed into the ResNet blocks.
-        # The ResNet blocks will have their own MLPs to process these embeddings.
+        H = 32  # Typical spatial size for image features
+        time_emb_dim = int(H)
+        phi_embed_dim = int(H)
+
+        nc_1, nc_2, nc_3, nc_4, nc_5 = dim, dim * 2, dim * 4, dim * 8, dim * 16
 
         # Initial convolution
-        self.init_conv = BlockGDiff2D(img_channels, self.dims[0], dropout=dropout) # from img_channels to dim
+        self.init_conv = BlockGDiff2D(channels, nc_1)
 
-        # Time embedding
-        self.time_embedding = SinusoidalTimeEmbedding(dim=time_embed_dim)
+        # Down blocks
+        self.down_blocks = nn.ModuleList([
+            ResnetBlockGDiff2D(nc_1, nc_2),
+            ResnetBlockGDiff2D(nc_2, nc_3),
+            ResnetBlockGDiff2D(nc_3, nc_4),
+            ResnetBlockGDiff2D(nc_4, nc_5)
+        ])
 
-        # Phi_CMB (cosmological parameters) embedding
-        self.phi_embedding = PhiEmbeddingCosmo(
-            input_phi_dim=phi_input_dim,
-            hidden_dim=phi_embed_dim, # intermediate hidden dim for phi MLP
-            output_emb_dim=phi_embed_dim # Final embedding size for phi
-        )
-        
-        # --- Downsampling Path ---
-        self.down_blocks = nn.ModuleList()
-        self.down_attns = nn.ModuleList() # Store attention separately for clarity
-        current_channels = self.dims[0]
-        for i, out_channels in enumerate(self.dims[1:]): # dim*2, dim*4, dim*8
-            self.down_blocks.append(
-                ResnetBlockGDiff2D(
-                    current_channels, out_channels,
-                    time_emb_dim=time_embed_dim,
-                    physical_param_emb_dim=phi_embed_dim, # Pass the output dim of PhiEmbeddingCosmo
-                    dropout=dropout
-                )
-            )
-            # Add attention at deeper layers (e.g., last two down_blocks)
-            if i >= len(self.dims) - 3: # e.g. for dim*4 and dim*8 stages
-                 self.down_attns.append(SelfAttention2D(out_channels, dim_head=attn_dim_head, heads=attn_heads))
-            else:
-                 self.down_attns.append(nn.Identity()) # No attention
-            current_channels = out_channels
-            # Add Downsampling layer (e.g., Conv2d stride 2 or MaxPool2d)
-            if i < len(self.dims) - 2: # Don't downsample after the last down_block before bottleneck
-                self.down_blocks.append(nn.Conv2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1)) # Downsample
+        # Attention blocks
+        self.attn_blocks = nn.ModuleList([
+            None,
+            None,
+            SelfAttention2D(nc_4, heads=attn_heads, dim_head=attn_dim_head),
+            SelfAttention2D(nc_5, heads=attn_heads, dim_head=attn_dim_head)
+        ])
+
+        # Embeddings
+        self.time_embeddings = nn.ModuleList([
+            SinusoidalTimeEmbedding(nc_2),
+            SinusoidalTimeEmbedding(nc_3),
+            SinusoidalTimeEmbedding(nc_4),
+            SinusoidalTimeEmbedding(nc_5)
+        ])
+
+        self.alpha_embeddings = nn.ModuleList([
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_2),
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_3),
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_4),
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_5)
+        ])
 
         # Bottleneck
-        # The last current_channels is dims[-1] (e.g., dim*8)
-        bottleneck_channels = current_channels # Let's keep it same as last down stage for now
-        self.bottleneck_res1 = ResnetBlockGDiff2D(
-            current_channels, bottleneck_channels,
-            time_emb_dim=time_embed_dim,
-            physical_param_emb_dim=phi_embed_dim,
-            dropout=dropout
-        )
-        self.bottleneck_attn = SelfAttention2D(bottleneck_channels, dim_head=attn_dim_head, heads=attn_heads)
-        self.bottleneck_res2 = ResnetBlockGDiff2D(
-            bottleneck_channels, bottleneck_channels, # Stays bottleneck_channels
-            time_emb_dim=time_embed_dim,
-            physical_param_emb_dim=phi_embed_dim,
-            dropout=dropout
-        )
-        current_channels = bottleneck_channels
+        self.bottleneck = BlockGDiff2D(nc_5, nc_5)
+        self.att_bottleneck = SelfAttention2D(nc_5, heads=attn_heads, dim_head=attn_dim_head)
+        self.bottl_down = BlockGDiff2D(nc_5, nc_4)
 
-        # --- Upsampling Path ---
-        self.up_blocks = nn.ModuleList()
-        self.up_attns = nn.ModuleList()
-        # Iterate in reverse over dims, excluding the first one (init_conv output)
-        # And excluding the last one (bottleneck input)
-        reversed_skip_dims = self.dims[:-1][::-1] # e.g. [dim*4, dim*2, dim]
+        # Up blocks
+        self.up_blocks = nn.ModuleList([
+            ResnetBlockGDiff2D(nc_5 + nc_4, nc_4),
+            ResnetBlockGDiff2D(nc_4 + nc_4, nc_3),
+            ResnetBlockGDiff2D(nc_3 + nc_3, nc_2),
+            ResnetBlockGDiff2D(nc_2 + nc_2, nc_1)
+        ])
 
-        for i, skip_channels in enumerate(reversed_skip_dims): # skip_channels are dim*4, dim*2, dim
-            # Add Upsampling layer (e.g., ConvTranspose2d)
-            # The output channels of upsampling should match skip_channels to allow ResNetBlock input
-            self.up_blocks.append(nn.ConvTranspose2d(current_channels, skip_channels, kernel_size=4, stride=2, padding=1)) # Upsample
-            
-            self.up_blocks.append(
-                ResnetBlockGDiff2D(
-                    skip_channels * 2, skip_channels, # Input is skip_channels from upsample + skip_channels from skip connection
-                    time_emb_dim=time_embed_dim,
-                    physical_param_emb_dim=phi_embed_dim,
-                    dropout=dropout
-                )
-            )
-            if i < 2 : # Add attention at deeper up_blocks (mirroring down_blocks)
-                self.up_attns.append(SelfAttention2D(skip_channels, dim_head=attn_dim_head, heads=attn_heads))
-            else:
-                self.up_attns.append(nn.Identity())
-            current_channels = skip_channels
-            
-        # Final convolution
-        self.final_conv = FinalConvLayer2D(self.dims[0], img_channels) # from dim to img_channels
+        self.time_embeddings_up = nn.ModuleList([
+            SinusoidalTimeEmbedding(nc_4),
+            SinusoidalTimeEmbedding(nc_3),
+            SinusoidalTimeEmbedding(nc_2),
+            SinusoidalTimeEmbedding(nc_1)
+        ])
 
-    def forward(self, x, t, phi_cmb=None): # t is [B], phi_cmb is [B, 3]
+        self.alpha_embeddings_up = nn.ModuleList([
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_4),
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_3),
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_2),
+            PhiEmbeddingCosmo(phi_input_dim, hidden_dim=phi_embed_dim, output_emb_dim=nc_1)
+        ])
+
+        self.outc = FinalConvLayer2D(nc_1, channels)
+
+    def forward(self, x, t, phi_cmb=None): # t is [B], phi_cmb is [B, 2]
         # Input checks for phi_cmb
         if phi_cmb is None:
             # Default to zeros if not provided (e.g., for unconditional training if ever needed)
-            phi_cmb = torch.zeros(x.shape[0], 3, device=x.device, dtype=x.dtype)
+            phi_cmb = torch.zeros(x.shape[0], 2, device=x.device, dtype=x.dtype)
         elif not isinstance(phi_cmb, torch.Tensor):
             phi_cmb = torch.tensor(phi_cmb, device=x.device, dtype=x.dtype)
         
         if phi_cmb.ndim == 1: # If a single [sigma, H0, wb] is passed for the batch
             phi_cmb = phi_cmb.unsqueeze(0).repeat(x.shape[0], 1)
-        elif phi_cmb.shape[0] != x.shape[0] or phi_cmb.shape[1] != 3:
-            raise ValueError(f"phi_cmb shape must be [batch_size, 3] or [3] for broadcasting. Got {phi_cmb.shape}")
+        elif phi_cmb.shape[0] != x.shape[0] or phi_cmb.shape[1] != 2:
+            raise ValueError(f"phi_cmb shape must be [batch_size, 2] or [2] for broadcasting. Got {phi_cmb.shape}")
 
-        # 1. Initial Convolution
+        # Initial Convolution
         x = self.init_conv(x) # (B, dim, H, W)
         
-        # 2. Embeddings
-        time_e = self.time_embedding(t)       # (B, time_embed_dim)
-        phi_e = self.phi_embedding(phi_cmb)   # (B, phi_embed_dim)
+        residuals = []
 
-        # 3. Downsampling Path
-        skip_connections = []
-        block_idx = 0 # For ResNet and Attention
-        downsample_idx = 0 # For Conv2d downsampling layers
+        # Down path
+        for i, down in enumerate(self.down_blocks):
+            x = down(x)
+            emb = self.time_embeddings[i](t) + self.alpha_embeddings[i](phi_cmb)
+            x = x + emb.unsqueeze(-1).unsqueeze(-1)
+            if self.attn_blocks[i] is not None:
+                x = self.attn_blocks[i](x)
+            residuals.append(x)
 
-        num_resnet_stages_down = len(self.dims) -1 # 3 stages for dims = [d, 2d, 4d, 8d]
+        # Bottleneck
+        x = self.bottleneck(x)
+        x = x + self.time_embeddings[-1](t).unsqueeze(-1).unsqueeze(-1)
+        x = self.att_bottleneck(x)
+        x = self.bottl_down(x)
+        
+        # Up path
+        for i, up in enumerate(self.up_blocks):
+            res = residuals[-(i + 1)]
+            x = torch.cat([x, res], dim=1)
+            x = up(x)
+            emb = self.time_embeddings_up[i](t) + self.alpha_embeddings_up[i](phi_cmb)
+            x = x + emb.unsqueeze(-1).unsqueeze(-1)
 
-        # x is (B, dims[0], H, W)
-        for i in range(num_resnet_stages_down): # 0, 1, 2
-            # ResNetBlock + Attention
-            res_block = self.down_blocks[block_idx]
-            attn_block = self.down_attns[block_idx]
-            x = res_block(x, time_e, phi_e)
-            x = attn_block(x)
-            skip_connections.append(x)
-            block_idx += 1
-            
-            # Downsampling Conv (if not the last stage before bottleneck)
-            if i < num_resnet_stages_down - 1:
-                downsampler = self.down_blocks[block_idx] # This is the Conv2d for downsampling
-                x = downsampler(x)
-                block_idx +=1
-
-
-        # 4. Bottleneck
-        x = self.bottleneck_res1(x, time_e, phi_e)
-        x = self.bottleneck_attn(x)
-        x = self.bottleneck_res2(x, time_e, phi_e)
-        # x is now (B, bottleneck_channels, H_bottleneck, W_bottleneck)
-
-        # 5. Upsampling Path
-        block_idx = 0 # For Upsample ConvT and ResNet
-        attn_idx = 0
-        skip_connections = skip_connections[::-1] # Reverse for easy popping
-
-        num_resnet_stages_up = len(self.dims) -1
-
-        for i in range(num_resnet_stages_up): # 0, 1, 2
-            upsampler = self.up_blocks[block_idx]
-            x = upsampler(x) # Upsample (e.g. ConvTranspose2d)
-            block_idx +=1
-
-            skip = skip_connections[i]
-            x = torch.cat((x, skip), dim=1) # Concatenate with skip connection
-
-            res_block = self.up_blocks[block_idx]
-            attn_block = self.up_attns[attn_idx]
-
-            x = res_block(x, time_e, phi_e)
-            x = attn_block(x)
-            
-            block_idx +=1
-            attn_idx +=1
-
-        # 6. Final Convolution
-        out = self.final_conv(x)
-        return out
-
+        return self.outc(x)
+    
     @torch.no_grad()
-    def summary(self, x_shape, t_shape, phi_shape): # Added phi_shape
-        # (Summary code from your original, adapted for phi_shape)
+    def summary(self, x_shape, t_shape): ## phi gets traced automatically
+        """
+        Kears-style Summary of the Unet1D model architecture.
+        
+        Args:
+            x_shape: Shape of input data tensor (batch_size, channels, seq_length)
+            # t_shape: Shape of timestep tensor (batch_size,)
+        """
+        
+        # Create example inputs
         x = torch.zeros(x_shape).to(self.device)
-        t = torch.zeros(t_shape, dtype=torch.float32).to(self.device) # t is often float for continuous time
-        phi = torch.zeros(phi_shape).to(self.device)
-
+        t = torch.zeros(t_shape, dtype=torch.long).to(self.device)
+        
+        # Dictionary to store layer info
         layer_info = []
+        
+        # Hook to capture layer info
         def get_layer_info(name):
             def hook(module, input, output):
+                # Get parameters
                 params = sum(p.numel() for p in module.parameters() if p.requires_grad)
-                output_shape = None
-                if isinstance(output, torch.Tensor): output_shape = output.shape
-                elif isinstance(output, tuple) and output: output_shape = output[0].shape
                 
+                # For modules that have multiple outputs (like tuples), get the first tensor shape
+                if isinstance(output, tuple):
+                    output_shape = output[0].shape if output else None
+                else:
+                    output_shape = output.shape
+
                 layer_info.append({
-                    'name': name, 'type': module.__class__.__name__,
-                    'output_shape': tuple(output_shape) if output_shape else None, 'params': params
+                    'name': name,
+                    'type': module.__class__.__name__,
+                    'output_shape': tuple(output_shape) if output_shape else None,
+                    'params': params
                 })
             return hook
         
+        # Register hooks for each module
         hooks = []
-        # Simplified hook registration: iterate through direct children for top-level summary
-        for name, module in self.named_children():
-            hooks.append(module.register_forward_hook(get_layer_info(name)))
+        for name, module in self.named_modules():
+            if name and '.' in name and not any(name.endswith(x) for x in ['.weight', '.bias']):
+                hooks.append(module.register_forward_hook(get_layer_info(name)))
         
+        # Run a forward pass
         try:
-            _ = self.forward(x, t, phi) # Run forward pass
-            total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-            print("_" * 100)
-            print(f"Model: {self.__class__.__name__}")
-            print("=" * 100)
-            print(f"{'Layer (type)':<40}{'Output Shape':<30}{'Param #':<15}")
-            print("=" * 100)
-            print(f"{'input_x (InputLayer)':<40}{str(x_shape):<30}{'0':<15}")
-            print(f"{'input_t (InputLayer)':<40}{str(t_shape):<30}{'0':<15}")
-            print(f"{'input_phi (InputLayer)':<40}{str(phi_shape):<30}{'0':<15}")
+            with torch.no_grad():
+                output = self.forward(x, t)
             
-            current_x_shape = x_shape # To track shape through network for summary (simplified)
+            # Calculate total params
+            total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            trainable_params = total_params
+            non_trainable_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+            
+            # Print model summary in Keras style
+            print("_" * 100)
+            print("Model: Unet1D")
+            print("=" * 100)
+            print(f"{'Layer (type)':<40}{'Output Shape':<25}{'Param #':<15}")
+            print("=" * 100)
+            
+            # Input layers
+            print(f"{'input_1 (InputLayer)':<40}{str(x_shape):<25}{'0':<15}")
+            print(f"{'input_2 (InputLayer)':<40}{str(t_shape):<25}{'0':<15}")
+            
+            # Display layer information
             for layer in layer_info:
-                print(f"{layer['name']} ({layer['type']})".ljust(40) +
-                      f"{str(layer['output_shape'])}".ljust(30) +
-                      f"{layer['params']:,}".ljust(15))
-                if layer['output_shape'] and len(layer['output_shape']) == 4: # Assume Conv2D like layer
-                    current_x_shape = layer['output_shape']
-
-
+                if layer['output_shape'] is not None:
+                    print(f"{layer['name']} ({layer['type']})".ljust(40) + 
+                        f"{str(layer['output_shape'])}".ljust(25) + 
+                        f"{layer['params']}".ljust(15))
+            
             print("=" * 100)
             print(f"Total params: {total_params:,}")
-            print(f"Trainable params: {total_params:,}") # Assuming all are trainable
-            print(f"Non-trainable params: {0:,}")
+            print(f"Trainable params: {trainable_params:,}")
+            print(f"Non-trainable params: {non_trainable_params:,}")
             print("_" * 100)
             
         finally:
-            for hook in hooks: hook.remove()
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
 
 # --- Example Usage ---
 if __name__ == '__main__':
@@ -406,11 +373,11 @@ if __name__ == '__main__':
     base_dim = 64       # Base number of channels
     img_channels = 1    # Input image channels (e.g., 1 for grayscale dust map)
     time_emb_dim = 256  # Dimension for time embeddings
-    phi_input_dim = 3   # For (sigma_CMB, H0, ombh2)
+    phi_input_dim = 2   # For (sigma_CMB, H0, ombh2)
     phi_emb_output_dim = 256 # Output dimension of the PhiEmbeddingCosmo layer
 
     # Create the U-Net model
-    model = Unet2DCosmoGDiff(
+    model = Unet2DGDiff_cosmo(
         dim=base_dim,
         img_channels=img_channels,
         time_embed_dim=time_emb_dim,

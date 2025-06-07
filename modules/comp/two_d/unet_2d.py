@@ -74,14 +74,13 @@ class SelfAttention2D(nn.Module):
         return self.to_out(out)
 
 class TimeEmbedding2D(nn.Module):
-    def __init__(self, channels, embed_size):
+    def __init__(self, embed_size):
         super().__init__()
-        self.channels = channels
         self.embed_size = embed_size
 
     def forward(self, t):
         device = t.device
-        half_dim = self.channels // 2
+        half_dim = self.embed_size // 2
         inv_freq = 1.0 / (10000 ** (torch.arange(0, half_dim, device=device).float() / half_dim))
         t = t.unsqueeze(-1)  # [B, 1]
         sinusoid = t * inv_freq  # [B, D/2]
@@ -238,7 +237,7 @@ class Unet2DGDiff(nn.Module):
         return self.outc(x)
 
     @torch.no_grad()
-    def summary(self, x_shape, t_shape):
+    def summary(self, x_shape, t_shape): ## phi gets traced automatically
         """
         Kears-style Summary of the Unet1D model architecture.
         

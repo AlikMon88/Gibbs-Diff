@@ -249,21 +249,21 @@ class GibbsDiff2D_cosmo(nn.Module):
             active_mask = (t_eff_indices >= t_val_ddpm).float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
             
             if torch.sum(active_mask) > 0: # If any chain is active
-                z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate)
+                z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate[:, 1, :, 2])
                 current_z = active_mask * z_prev_t + (1.0 - active_mask) * current_z # Update only active chains
             
         return current_z # This is the sampled x_k (dust map)
 
     def run_gibbs_sampler(self,
-                                y_observed, # Single observation or batch [B_orig, C, H, W]
-                                num_chains_per_gibbs_sample, # Number of parallel MCMC chains for Phi_CMB
-                                n_it_gibbs=10,
-                                n_it_burnin_gibbs=2,
-                                initial_phi_cmb=None, # Optional starting point for Phi_CMB [B_orig*N_chains, 3]
-                                hmc_step_size_initial=0.01, # Initial HMC step size
-                                hmc_inv_mass_matrix_initial=None, # Initial HMC inv mass matrix
-                                adapt_hmc_during_burnin=True,
-                                return_chains_history=False):
+                            y_observed, # Single observation or batch [B_orig, C, H, W]
+                            num_chains_per_gibbs_sample, # Number of parallel MCMC chains for Phi_CMB
+                            n_it_gibbs=10,
+                            n_it_burnin_gibbs=2,
+                            initial_phi_cmb=None, # Optional starting point for Phi_CMB [B_orig*N_chains, 3]
+                            hmc_step_size_initial=0.01, # Initial HMC step size
+                            hmc_inv_mass_matrix_initial=None, # Initial HMC inv mass matrix
+                            adapt_hmc_during_burnin=True,
+                            return_chains_history=False):
         """
         Runs the Gibbs sampler for the cosmology problem.
         y_observed: The input mixed map (dust + CMB). Shape [B_orig, C, H, W]
@@ -296,7 +296,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         current_hmc_step_size = hmc_step_size_initial
         current_hmc_inv_mass_matrix = hmc_inv_mass_matrix_initial
         if current_hmc_inv_mass_matrix is None: # Default to identity if not provided
-             current_hmc_inv_mass_matrix = torch.eye(3, device=device).unsqueeze(0).repeat(total_chains,1,1) # Diagonal or per chain
+             current_hmc_inv_mass_matrix = torch.eye(3, device=device).unsqueeze(0).repeat(total_chains, 1, 1) # Diagonal or per chain
 
         phi_min_bounds, phi_max_bounds = get_phi_cmb_all_bounds(device=device)
 
