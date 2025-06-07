@@ -23,6 +23,20 @@ import camb # For CMB power spectra
 # )
 # --- End Global Configurations Placeholder ---
 
+sigma_eps = 1e-6 # Unused in this snippet, but kept from original
+sigma_min, sigma_max = 0.04, 0.4
+
+OMCH2_FID = 0.122 # Cold dark matter density omega_c * h^2
+OMK_FID = 0.0    # Omega_k
+TAU_FID = 0.0544 # Optical depth
+NS_FID = 0.9649  # Scalar spectral index
+AS_FID = 2.1e-9  # Scalar amplitude (ln(10^10 As) = 3.044 => As ~ 2.1e-9)
+
+H0_PRIOR_MIN, H0_PRIOR_MAX = 50.0, 90.0
+OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX = 0.0075, 0.0567 # Note: paper uses omega_b, CAMB uses ombh2
+# To convert: omega_b = ombh2 / (H0/100)^2. For priors, it's easier to sample H0 and ombh2 directly.
+SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.2 # sigma_min should be >0. Let's use 0.1 for now.
+
 
 # --- Caching ---
 _camb_cls_cache = {}
@@ -31,21 +45,46 @@ _lmap_cache_cosmo = {}
 # --- Cosmology Specific Likelihood & Prior ---
 
 def get_cosmo_lmap(shape_hw, wcs, device='cpu'): # shape_hw is (H,W)
-    key = (tuple(shape_hw), str(wcs.radesys if wcs else "NoneWCS"))
+    """
+    Gets or computes and caches the lmap for Fourier operations.
+    A more robust key might be needed if WCS varies subtly for the same shape.
+    For many use cases, shape and a simple WCS descriptor are enough.
+    """
+    # Try to create a somewhat unique key from WCS properties that affect lmap
+    # This is still a heuristic. The best is to precompute lmap once if WCS is fixed for a shape.
+    if wcs is not None:
+        # Extract some key WCS parameters that define the geometry for lmap
+        # CRVAL might not always be present or consistently named for all projections
+        # Using CD matrix (or CDELT) and CRPIX is more fundamental
+        try:
+            cd_flat = tuple(wcs.wcs.cd.flatten()) if hasattr(wcs, 'wcs') and hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None else tuple(wcs.wcs.cdelt)
+            crpix_flat = tuple(wcs.wcs.crpix)
+            ctype_tuple = tuple(wcs.wcs.ctype)
+            key_wcs_part = (cd_flat, crpix_flat, ctype_tuple)
+        except AttributeError: # Fallback if wcs.wcs structure is different
+            key_wcs_part = str(wcs) # Less ideal, but better than error
+    else:
+        key_wcs_part = "NoneWCS"
+
+    key = (tuple(shape_hw), key_wcs_part)
+
     if key not in _lmap_cache_cosmo:
-        if wcs is None: raise ValueError("WCS must be provided to generate lmap.")
-        _lmap_cache_cosmo[key] = enmap.lmap(shape_hw, wcs).to(device)
+        if wcs is None:
+            raise ValueError("WCS must be provided to generate lmap.")
+        # print(f"Cache miss for lmap key: {key}. Computing lmap.") # For debugging
+        _lmap_cache_cosmo[key] = enmap.lmap(shape_hw, wcs)
+    # else:
+        # print(f"Cache hit for lmap key: {key}") # For debugging
     return _lmap_cache_cosmo[key]
 
-def get_camb_cls_cosmo(H0, ombh2,
-                       omch2_fid, omk_fid, tau_fid, As_fid, ns_fid,
-                       lmax_camb, device='cpu'):
-    param_key = (float(H0), float(ombh2), omch2_fid, omk_fid, tau_fid, As_fid, ns_fid, lmax_camb)
+def get_camb_cls_cosmo(H0, ombh2, lmax_camb, device='cpu'):
+
+    param_key = (float(H0), float(ombh2), OMCH2_FID, OMK_FID, TAU_FID, AS_FID, NS_FID, lmax_camb)
     if param_key in _camb_cls_cache:
         return _camb_cls_cache[param_key].to(device)
     pars = camb.CAMBparams()
-    pars.set_cosmology(H0=float(H0), ombh2=float(ombh2), omch2=omch2_fid, omk=omk_fid, tau=tau_fid)
-    pars.InitPower.set_params(As=As_fid, ns=ns_fid, r=0)
+    pars.set_cosmology(H0=float(H0), ombh2=float(ombh2), omch2=OMCH2_FID, omk=OMK_FID, tau=TAU_FID)
+    pars.InitPower.set_params(As=AS_FID, ns=NS_FID, r=0)
     pars.set_for_lmax(lmax_camb, lens_potential_accuracy=0)
     results = camb.get_results(pars)
     powers = results.get_cmb_power_spectra(pars, CMB_unit='muK')
@@ -80,7 +119,7 @@ def log_prior_phi_cmb(phi_cmb_batch, prior_bounds_tuple):
     return log_p
 
 def log_likelihood_cmb_phi(phi_cmb_batch, epsilon_cmb_batch,
-                           lmap_fourier, fiducial_cosmo_params_dict, lmax_camb,
+                           lmap_fourier, lmax_camb,
                            psd_regularizer=1e-30): # Increased regularizer
     batch_size = epsilon_cmb_batch.shape[0]
     device = epsilon_cmb_batch.device
@@ -98,7 +137,7 @@ def log_likelihood_cmb_phi(phi_cmb_batch, epsilon_cmb_batch,
 
     for i in range(batch_size):
         sigma_cmb_i, H0_i, ombh2_i = phi_cmb_batch[i, 0], phi_cmb_batch[i, 1], phi_cmb_batch[i, 2]
-        cl_1d_base_i = get_camb_cls_cosmo(H0_i.item(), ombh2_i.item(), **fiducial_cosmo_params_dict, lmax_camb=lmax_camb, device=device)
+        cl_1d_base_i = get_camb_cls_cosmo(H0_i.item(), ombh2_i.item(), lmax_camb=lmax_camb, device=device)
         s_phi_k_2d_i = cl_to_2d_power_spectrum_cosmo(cl_1d_base_i, sigma_cmb_i, lmap_fourier, device=device)
         s_phi_k_2d_i_reg = torch.clamp(s_phi_k_2d_i, min=psd_regularizer)
         
@@ -107,7 +146,7 @@ def log_likelihood_cmb_phi(phi_cmb_batch, epsilon_cmb_batch,
         log_likelihood_vals[i] = -0.5 * (log_det_term + chi_sq_term)
     return log_likelihood_vals
 
-def get_phi_cmb_parameter_bounds(sigma_min, sigma_max, h0_min, h0_max, ombh2_min, ombh2_max, device='cpu'):
+def get_phi_cmb_parameter_bounds(sigma_min = SIGMA_CMB_PRIOR_MIN, sigma_max = SIGMA_CMB_PRIOR_MAX, h0_min = H0_PRIOR_MIN, h0_max = H0_PRIOR_MAX, ombh2_min = OMBH2_PRIOR_MIN, ombh2_max = OMBH2_PRIOR_MAX, device='cpu'):
     mins = torch.tensor([sigma_min, h0_min, ombh2_min], dtype=torch.float32, device=device)
     maxs = torch.tensor([sigma_max, h0_max, ombh2_max], dtype=torch.float32, device=device)
     return mins, maxs
@@ -398,7 +437,7 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
 
 # --- Example Main Block (Illustrative) ---
 if __name__ == '__main__':
-    print("Testing Cosmology HMC Utilities & Sampler...")
+    print("Running __HMC_cosmo__ ...")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # --- Define Global constants for the test ---
@@ -444,7 +483,7 @@ if __name__ == '__main__':
                 log_l_cmb = torch.zeros_like(log_p)
                 log_l_cmb[valid_mask] = log_likelihood_cmb_phi(
                      phi_cmb_batch[valid_mask], dummy_epsilon[valid_mask], lmap_for_hmc_test,
-                     FIDUCIAL_COSMO_PARAMS_DICT, LMAX_CAMB_COSMO, psd_regularizer=1e-20
+                     LMAX_CAMB_COSMO, psd_regularizer=1e-20
                 )
                 log_p = log_p + log_l_cmb # Add log-likelihood only where prior is valid
             return log_p

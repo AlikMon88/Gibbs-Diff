@@ -22,8 +22,9 @@ from tqdm.auto import tqdm
 from ...utils.helper import *
 from .unet_2d import *
 from ...utils.noise_create_2d import get_colored_noise_2d
-from ...utils.hmc import *
-from ...utils.hmc_v2 import *
+from ...utils.hmc_cosmo import *
+
+from pixell import enmap
 
 # Helper functions for noise schedule (can be kept from your original)
 def extract(a, t, x_shape):
@@ -45,13 +46,19 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
+# Priors (from paper Section 3.2)
+H0_PRIOR_MIN, H0_PRIOR_MAX = 50.0, 90.0
+OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX = 0.0075, 0.0567 # Note: paper uses omega_b, CAMB uses ombh2
+# To convert: omega_b = ombh2 / (H0/100)^2. For priors, it's easier to sample H0 and ombh2 directly.
+SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.2 # sigma_min should be >0. Let's use 0.1 for now.
+
 
 class GibbsDiff2D_cosmo(nn.Module):
     def __init__(
         self,
         model,
         *,
-        image_size_hw, # Tuple (H, W), e.g., (256, 256)
+        image_size, # Tuple (H, W), e.g., (256, 256)
         img_channels=1,
         num_timesteps_ddpm=1000, # Timesteps for the DDPM noise schedule
         sampling_timesteps_ddpm=None, # For DDIM-like acceleration if used
@@ -67,7 +74,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         self.model = model
         self.device = model.device # Assumes model is already on the correct device
         self.num_timesteps_ddpm = num_timesteps_ddpm
-        self.image_size_hw = image_size_hw
+        self.image_size_hw = image_size
         self.img_channels = img_channels
 
         # Setup DDPM noise schedule
@@ -99,9 +106,7 @@ class GibbsDiff2D_cosmo(nn.Module):
     def set_lmap_fourier(self, lmap_tensor):
         self.lmap_fourier = lmap_tensor.to(self.device)
 
-    def get_gdiff_loss(self, clean_dust_batch, # x_0 (clean dust maps)
-                       phi_cmb_batch,          # Corresponding true Phi_CMB for these maps
-                       ddpm_timesteps):        # Sampled DDPM timesteps t
+    def get_gdiff_loss(self, clean_dust_batch, ddpm_timesteps, phi_cmb_batch=None):
         """
         Calculates the diffusion model training loss.
         clean_dust_batch: [B, C, H, W]
@@ -110,6 +115,17 @@ class GibbsDiff2D_cosmo(nn.Module):
         """
         batch_size = clean_dust_batch.shape[0]
         
+        if phi_cmb_batch is None:
+            # sample phi_cmb sample between MIN_MAX range | shape (batch_size, 2)
+            phi_h0_batch = torch.rand(batch_size, 1, device=self.device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
+            phi_omb_batch = torch.rand(batch_size, 1, device=self.device) * (OMBH2_PRIOR_MIN - OMBH2_PRIOR_MIN) + OMBH2_PRIOR_MIN
+
+        elif isinstance(phi_cmb_batch[0], float) or isinstance(phi_cmb_batch[0], int):
+            phi_h0_batch = phi_cmb_batch[0] * torch.ones(batch_size, 1).to(self.device)
+            phi_omb_batch = phi_cmb_batch[1] * torch.ones(batch_size, 1).to(self.device)
+
+        phi_cmb_batch = torch.concatenate([phi_h0_batch, phi_omb_batch], dim=1)
+
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
@@ -123,13 +139,13 @@ class GibbsDiff2D_cosmo(nn.Module):
 
         # 4. Get model prediction (predicts the DDPM noise eps)
         # The model is conditioned on ddpm_timesteps and the true phi_cmb_batch
-        predicted_ddpm_noise = self.model(z_t, ddpm_timesteps.float(), phi_cmb=phi_cmb_batch)
+        predicted_ddpm_noise = self.model(z_t.float(), ddpm_timesteps.float(), phi_cmb=phi_cmb_batch)
 
         # 5. Calculate MSE loss
         loss = nn.functional.mse_loss(predicted_ddpm_noise, ddpm_noise_eps)
         return loss
 
-    def forward(self, clean_dust_img, phi_cmb_params, *args, **kwargs): # For training wrapper
+    def forward(self, clean_dust_img, *args, **kwargs): # For training wrapper
         """
         A forward pass suitable for training.
         clean_dust_img: Batch of clean dust maps [B, C, H, W]
@@ -141,7 +157,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         # Sample random DDPM timesteps for this batch
         t_ddpm = torch.randint(0, self.num_timesteps_ddpm, (b,), device=self.device).long()
         
-        return self.get_gdiff_loss(clean_dust_img, phi_cmb_params, t_ddpm)
+        return self.get_gdiff_loss(clean_dust_img, t_ddpm)
 
     def get_closest_ddpm_timestep_from_sigma_cmb(self, sigma_cmb_values): # sigma_cmb_values is [B_chains]
         """
@@ -269,7 +285,8 @@ class GibbsDiff2D_cosmo(nn.Module):
         y_observed: The input mixed map (dust + CMB). Shape [B_orig, C, H, W]
         """
         if self.lmap_fourier is None:
-            raise ValueError("lmap_fourier must be set before running Gibbs sampler. Call set_lmap_fourier().")
+            WCS_COSMO_MAP_TEST = enmap.zeros(self.image_size_hw).wcs
+            self.lmap_fourier = get_cosmo_lmap(self.image_size_hw, WCS_COSMO_MAP_TEST, device=self.device)
 
         device = self.device
         original_batch_size = y_observed.shape[0]
@@ -285,8 +302,8 @@ class GibbsDiff2D_cosmo(nn.Module):
         else:
             # Sample from prior or a smarter initialization
             s_init = torch.rand(total_chains, 1, device=device) * (SIGMA_CMB_PRIOR_MAX - SIGMA_CMB_PRIOR_MIN) + SIGMA_CMB_PRIOR_MIN
-            h_init = torch.rand(total_chains, 1, device=device) * (H0_PRIOR_MAX_COSMO - H0_PRIOR_MIN_COSMO) + H0_PRIOR_MIN_COSMO
-            o_init = torch.rand(total_chains, 1, device=device) * (OMBH2_PRIOR_MIN_COSMO - OMBH2_PRIOR_MIN_COSMO) + OMBH2_PRIOR_MIN_COSMO
+            h_init = torch.rand(total_chains, 1, device=device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
+            o_init = torch.rand(total_chains, 1, device=device) * (OMBH2_PRIOR_MIN - OMBH2_PRIOR_MIN) + OMBH2_PRIOR_MIN
             phi_cmb_current = torch.cat([s_init, h_init, o_init], dim=1) # [B_total, 3]
 
         phi_cmb_history = []
@@ -298,7 +315,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         if current_hmc_inv_mass_matrix is None: # Default to identity if not provided
              current_hmc_inv_mass_matrix = torch.eye(3, device=device).unsqueeze(0).repeat(total_chains, 1, 1) # Diagonal or per chain
 
-        phi_min_bounds, phi_max_bounds = get_phi_cmb_all_bounds(device=device)
+        phi_min_bounds, phi_max_bounds = get_phi_cmb_parameter_bounds(device=device)
 
 
         for gibbs_iter in tqdm(range(n_it_gibbs + n_it_burnin_gibbs), desc="Gibbs Iterations"):
@@ -380,11 +397,11 @@ class GibbsDiff2D_cosmo(nn.Module):
             # Run HMC (using your sample_hmc_v2 or similar)
             # We need to ensure sample_hmc_v2 can take batched phi_init, step_size, inv_mass_matrix
             # and that log_prob_fn and log_grad handle batches.
-            phi_cmb_new, hmc_step_size_new, hmc_inv_mass_new, _ = sample_hmc_v2(
+            phi_cmb_new, hmc_step_size_new, hmc_inv_mass_new, _ = sample_hmc_cosmo(
                 log_prob_fn=hmc_log_posterior_fn,
                 log_grad_fn=hmc_gradient_log_posterior_fn,
                 phi_init=phi_cmb_current.detach(), # Start HMC from current Phi_CMB
-                mass_matrix_input=None if current_hmc_inv_mass_matrix is None else torch.linalg.inv(current_hmc_inv_mass_matrix.mean(0)).unsqueeze(0).repeat(total_chains,1,1), # HMC_v2 takes M
+                mass_matrix_input=None if current_hmc_inv_mass_matrix is None else torch.linalg.inv(current_hmc_inv_mass_matrix.mean(0)).unsqueeze(0).repeat(total_chains, 1, 1), # HMC_v2 takes M
                 step_size=current_hmc_step_size,
                 n_leapfrog_steps=self.hmc_n_leapfrog_steps,
                 chain_length=self.hmc_chain_length, # Produce 1 sample per Gibbs iter
@@ -432,7 +449,7 @@ class GibbsDiff2D_cosmo(nn.Module):
 
     def blind_posterior_mean(self, y_observed, num_chains_per_gibbs_sample=5,
                                    n_it_gibbs=10, n_it_burnin_gibbs=5,
-                                   return_full_posterior_chains=False, **hmc_kwargs):
+                                   return_full_posterior_chains=False, avg_pmean=2, **hmc_kwargs):
         """
         Performs blind denoising for cosmology to get posterior mean estimates.
         y_observed: [B, C, H, W]
@@ -445,13 +462,16 @@ class GibbsDiff2D_cosmo(nn.Module):
             return_chains_history=True, # Get all history for averaging
             **hmc_kwargs
         )
-        # phi_chains: [B_orig, N_chains_gibbs, N_gibbs_samples, 3]
-        # x_chains:   [B_orig, N_chains_gibbs, N_gibbs_samples, C, H, W]
+        # phi_chains: [N_chains_gibbs, B, N_gibbs_samples, 3]
+        # x_chains:   [N_chains_gibbs, B, N_gibbs_samples, C, H, W]
+
+        phi_chains = phi_chains[:, -avg_pmean:].reshape(num_chains_per_gibbs_sample, -1, avg_pmean, 2)
+        x_chains = x_chains[:, -avg_pmean:].reshape(num_chains_per_gibbs_sample, -1, avg_pmean, self.channels, self.image_size_hw[0], self.image_size_hw[-1])
 
         if return_full_posterior_chains:
             return phi_chains, x_chains
         else:
             # Posterior mean over chains and Gibbs samples
-            phi_posterior_mean = phi_chains.mean(dim=(1, 2)) # Mean over N_chains_gibbs and N_gibbs_samples
-            x_dust_posterior_mean = x_chains.mean(dim=(1, 2))
+            phi_posterior_mean = phi_chains.mean(dim=(0, 2)) # Mean over N_chains_gibbs and N_gibbs_samples
+            x_dust_posterior_mean = x_chains.mean(dim=(0, 2))
             return phi_posterior_mean, x_dust_posterior_mean
