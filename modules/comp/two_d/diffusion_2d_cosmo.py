@@ -167,22 +167,27 @@ class GibbsDiff2D_cosmo(nn.Module):
         is closest to the provided physical sigma_CMB values.
         This is based on your interpretation for starting ancestral sampling.
         """
-        # # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
-        # ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
-        
-        # # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
-        # diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
-        # closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
 
+        # print('sigma_cmb_values: ', sigma_cmb_values.shape)
+
+        # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
+        ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
+        
+        # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
+        diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
+        closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
+
+        return closest_ddpm_t_indices # These are the t_eff to start DDPM from
+        
         ###################################
 
-        alpha_bar_t_ddpm = self.alpha_bar_t_ddpm.to(self.device)
-        all_noise_levels = torch.sqrt((1-alpha_bar_t_ddpm)/alpha_bar_t_ddpm).reshape(-1, 1).repeat(1, sigma_cmb_values.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
-        closest_timestep = torch.argmin(torch.abs(all_noise_levels - sigma_cmb_values), dim=0)
+        # alpha_bar_t_ddpm = self.alpha_bar_t_ddpm.to(self.device)
+        # all_noise_levels = torch.sqrt((1-alpha_bar_t_ddpm)/alpha_bar_t_ddpm).reshape(-1, 1).repeat(1, sigma_cmb_values.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
+        # print('Closest-Timestep: ', all_noise_levels.shape, sigma_cmb_values.shape)
+        # closest_timestep = torch.argmin(torch.abs(all_noise_levels - sigma_cmb_values), dim=0)
 
-        return closest_timestep    
+        # return closest_timestep    
         
-        # return closest_ddpm_t_indices # These are the t_eff to start DDPM from
 
     @torch.no_grad()
     def denoise_1step_ancestral(self, z_t, t_ddpm, phi_cmb_cond): # t_ddpm is a scalar tensor
@@ -310,7 +315,7 @@ class GibbsDiff2D_cosmo(nn.Module):
 
             phi_cmb_current = torch.cat([s_init, h_init, o_init], dim=-1) # [B_total, 3]
 
-        print(phi_cmb_current.shape)
+        # print(phi_cmb_current.shape)
         phi_cmb_history = []
         x_dust_history = []
         
@@ -345,14 +350,16 @@ class GibbsDiff2D_cosmo(nn.Module):
                 
                     log_l = torch.zeros_like(log_p)
                     
-                    log_l = log_likelihood_cmb_phi(
+                    computed_log_likelihoods = log_likelihood_cmb_phi(
                         phi_cmb_trial[valid_prior_mask],
                         # phi_cmb_trial,
-                        estimated_cmb_residual, # Pass only relevant residuals
+                        estimated_cmb_residual[valid_prior_mask], # Pass only relevant residuals
                         self.WCS,
                         self.lmap_fourier, 
                         int(1.5 * self.image_size_hw[0])
                     )
+
+                    log_l[valid_prior_mask] = computed_log_likelihoods ## inf/null values padded by 0
                     log_p = log_p + log_l
                 
                 return log_p
@@ -436,6 +443,9 @@ class GibbsDiff2D_cosmo(nn.Module):
             # else:
             #     raise ValueError("Unexpected shape from HMC sampler for phi_cmb_new")
 
+            # print('phi_cmb_current: ', phi_cmb_current.shape)
+            # print('phi_cmb_new', phi_cmb_new.shape)
+       
             phi_cmb_current = phi_cmb_new.detach()
 
             # Update HMC step size and inv mass matrix if they were adapted
@@ -479,11 +489,12 @@ class GibbsDiff2D_cosmo(nn.Module):
             return_chains_history=True, # Get all history for averaging
             **hmc_kwargs
         )
-        # phi_chains: [N_chains_gibbs, B, N_gibbs_samples, 3]
-        # x_chains:   [N_chains_gibbs, B, N_gibbs_samples, C, H, W]
+        # phi_chains: [B, N_chains_gibbs, N_gibbs_samples, 3] -> [N_chains_gibbs, B, avg_pmean, 3]
+        # x_chains:   [B, N_chains_gibbs, N_gibbs_samples, C, H, W] -> [N_chains_gibbs, B, avg_pmean, channels, image_h, image_w]
 
-        phi_chains = phi_chains[:, -avg_pmean:].reshape(num_chains_per_gibbs_sample, -1, avg_pmean, 2)
-        x_chains = x_chains[:, -avg_pmean:].reshape(num_chains_per_gibbs_sample, -1, avg_pmean, self.channels, *self.image_size_hw)
+        # print(phi_chains.shape, x_chains.shape)
+        phi_chains = phi_chains[:, : , -avg_pmean:, :].reshape(num_chains_per_gibbs_sample, -1, avg_pmean, 3)
+        x_chains = x_chains[:, :, -avg_pmean:, :, :, :].reshape(num_chains_per_gibbs_sample, -1, avg_pmean, self.img_channels, *self.image_size_hw)
 
         if return_full_posterior_chains:
             return phi_chains, x_chains

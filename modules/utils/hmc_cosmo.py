@@ -148,7 +148,7 @@ def log_likelihood_cmb_phi(phi_cmb_batch,
     
     abs_epsilon_fourier_sq = torch.abs(epsilon_fourier_batch_torch)**2
     
-    print('phi_cmb_batch: ', phi_cmb_batch.shape)
+    # print('phi_cmb_batch: ', phi_cmb_batch.shape)
 
     for i in range(batch_size):
         sigma_cmb_i, H0_i, ombh2_i = phi_cmb_batch[i, 0], phi_cmb_batch[i, 1], phi_cmb_batch[i, 2]
@@ -197,7 +197,7 @@ class DualAveragingStepSizeHMC: # From GDiff pyhmc.py style, adapted for our HMC
 
     def get_final_averaged_step_size(self):
         if self.initial_step_size < 1e-9: return self.initial_step_size
-        return torch.exp(torch.tensor(self.log_averaged_step)).item()
+        return torch.exp(torch.tensor(self.log_averaged_step))
 
 def compute_mass_matrix_sqrt_from_M(mass_matrix_M):
     if mass_matrix_M is None: return None
@@ -434,7 +434,7 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
                 # The __call__ method for step_size_adapter from GDiff style HMC
                 # takes (current_adapt_step, accept_prob_batch, total_adapt_steps)
                 # Here, num_burnin_steps_hmc acts as total_adapt_steps for this HMC call
-                current_step_sizes_per_chain = step_size_adapter.update(accept_prob.mean().item())
+                current_step_sizes_per_chain = step_size_adapter.update(accept_prob.mean(dim=0).item())
 
             if adapt_mass_matrix:
                 q_collected_for_adapt_M.append(q.clone().detach())
@@ -475,12 +475,16 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
 
     final_q_samples = torch.stack(collected_samples_q, dim=1) if collected_samples_q else q.unsqueeze(1) # [B_chains, N_samples_chain, D_phi]
     
-    # print(current_step_sizes_per_chain, current_step_sizes_per_chain.shape)
-    final_step_size = current_step_sizes_per_chain.item() # Report one step size
+    # print('current_step_sizes_per_chain: ', current_step_sizes_per_chain, current_step_sizes_per_chain.shape, current_step_sizes_per_chain.numel())
+    final_step_size = current_step_sizes_per_chain.item() if current_step_sizes_per_chain.numel() < 2 else current_step_sizes_per_chain[0] # Report one step size
+    
     if adapt_step_size and step_size_adapter and num_burnin_steps_hmc > 0 :
         final_step_size = step_size_adapter.get_final_averaged_step_size()
 
-    return final_q_samples, final_step_size, current_M, np.mean(acceptance_rates[-num_samples_chain:]) if acceptance_rates else 0.0
+    # return final_q_samples[:, -1, :], final_step_size, current_M, np.mean(acceptance_rates[-num_samples_chain:]) if acceptance_rates else 0.0
+
+    ## only return the last state
+    return q, final_step_size, current_M, np.mean(acceptance_rates[-num_samples_chain:]) if acceptance_rates else 0.0
 
 
 # --- Example Main Block (Illustrative) ---
