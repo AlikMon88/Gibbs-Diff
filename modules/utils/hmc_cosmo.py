@@ -97,13 +97,16 @@ def get_camb_cls_cosmo(H0, ombh2, lmax_camb, device='cpu'):
     return cl_tt_tensor
 
 def cl_to_2d_power_spectrum_cosmo(cl_1d, sigma_cmb_amp, lmap_fourier, device='cpu'):
-    lmax_from_map = int(torch.max(lmap_fourier).item())
+    lmap_fourier = torch.tensor(lmap_fourier)
+    lmax_from_map = int(torch.max(torch.tensor(lmap_fourier)).item())
     cl_1d_padded = cl_1d
     if cl_1d.shape[0] <= lmax_from_map:
-        padding_needed = lmax_from_map + 1 - cl_1d.shape[0]
+        padding_needed = (lmax_from_map + 1) - cl_1d.shape[0]
         cl_1d_padded = torch.cat([cl_1d, torch.zeros(padding_needed, dtype=cl_1d.dtype, device=device)])
     
-    ps2d_base = cl_1d_padded[lmap_fourier.long().clamp(max=cl_1d_padded.shape[0]-1)]
+    lmap_fourier = lmap_fourier.long().clamp(min=0, max=(cl_1d_padded.shape[0])-1) ### clamping 0-150 (removing negatives)
+    # print(cl_1d_padded.shape, lmap_fourier.shape, lmap_fourier.long().clamp(max=(cl_1d_padded.shape[0])-1))
+    ps2d_base = cl_1d_padded[lmap_fourier]
     ps2d = ps2d_base * (sigma_cmb_amp**2)
     # Ensure modes with lmap < 2 (originally C0, C1 = 0) don't cause issues if ps2d_base was 0
     # If ps2d_base[lmap<2] is 0, then ps2d[lmap<2] is also 0. Regularizer handles this in likelihood.
@@ -118,22 +121,31 @@ def log_prior_phi_cmb(phi_cmb_batch, prior_bounds_tuple):
         log_p += torch.where((param_values >= mins[i]) & (param_values <= maxs[i]), 0.0, -torch.inf)
     return log_p
 
-def log_likelihood_cmb_phi(phi_cmb_batch, epsilon_cmb_batch,
-                           lmap_fourier, lmax_camb,
+def log_likelihood_cmb_phi(phi_cmb_batch, 
+                           epsilon_cmb_batch,
+                           wcs,
+                           lmap_fourier, 
+                           lmax_camb,
                            psd_regularizer=1e-30): # Increased regularizer
     batch_size = epsilon_cmb_batch.shape[0]
     device = epsilon_cmb_batch.device
     log_likelihood_vals = torch.zeros(batch_size, device=device)
 
     if epsilon_cmb_batch.ndim == 4 and epsilon_cmb_batch.shape[1] == 1:
-        current_epsilon_maps = epsilon_cmb_batch.squeeze(1)
+        epsilon_numpy_batch = epsilon_cmb_batch.squeeze(1).detach().cpu().numpy() ## detach the numpy-trace
+        # current_epsilon_maps = epsilon_cmb_batch.squeeze(1)
     elif epsilon_cmb_batch.ndim == 3:
-        current_epsilon_maps = epsilon_cmb_batch
+        # current_epsilon_maps = epsilon_cmb_batch
+        epsilon_numpy_batch = epsilon_cmb_batch.detach().cpu().numpy() ## detach the numpy-trace
     else:
         raise ValueError(f"epsilon_cmb_batch has unexpected shape: {epsilon_cmb_batch.shape}")
     
-    epsilon_fourier_batch = enmap.fft(current_epsilon_maps, normalize="phys")
-    abs_epsilon_fourier_sq = torch.abs(epsilon_fourier_batch)**2
+    batched_emap = enmap.ndmap(epsilon_numpy_batch, wcs)
+    # enmap.fft will operate on the last two dimensions
+    epsilon_fourier_numpy_batch = enmap.fft(batched_emap, normalize="phys")
+    epsilon_fourier_batch_torch = torch.from_numpy(epsilon_fourier_numpy_batch.astype(np.complex64)).to(device)
+    
+    abs_epsilon_fourier_sq = torch.abs(epsilon_fourier_batch_torch)**2
 
     for i in range(batch_size):
         sigma_cmb_i, H0_i, ombh2_i = phi_cmb_batch[i, 0], phi_cmb_batch[i, 1], phi_cmb_batch[i, 2]
@@ -158,14 +170,14 @@ class DualAveragingStepSizeHMC: # From GDiff pyhmc.py style, adapted for our HMC
         self.initial_step_size = initial_step_size
         # mu is log(10 * initial_step_size) in NUTS paper, can be just log(initial_step_size)
         # For safety with very small step sizes, ensure initial_step_size is positive
-        self.mu = torch.log(10 * self.initial_step_size) if self.initial_step_size > 1e-9 else torch.tensor(-np.inf)
+        self.mu = np.log(10 * self.initial_step_size) if self.initial_step_size > 1e-9 else -np.inf
         self.target_accept = target_accept
         self.gamma = gamma
         self.t = t0
         self.kappa = kappa
         self.error_sum = 0.0 # scalar error sum
         # log_averaged_step is for the *single* step size being adapted
-        self.log_averaged_step = torch.log(self.initial_step_size) if self.initial_step_size > 1e-9 else torch.tensor(-np.inf)
+        self.log_averaged_step = np.log(self.initial_step_size) if self.initial_step_size > 1e-9 else -np.inf
 
     def update(self, p_accept_scalar): # p_accept is scalar (mean acceptance over chains)
         if self.initial_step_size < 1e-9: # Step size effectively fixed
@@ -177,11 +189,11 @@ class DualAveragingStepSizeHMC: # From GDiff pyhmc.py style, adapted for our HMC
         eta = self.t ** -self.kappa
         self.log_averaged_step = eta * log_step + (1 - eta) * self.log_averaged_step
         self.t += 1.0
-        return torch.exp(torch.tensor(log_step)), torch.exp(self.log_averaged_step) # noisy, smoothed
+        return torch.exp(torch.tensor(log_step)) # noisy, smoothed
 
     def get_final_averaged_step_size(self):
         if self.initial_step_size < 1e-9: return self.initial_step_size
-        return torch.exp(self.log_averaged_step).item()
+        return torch.exp(torch.tensor(self.log_averaged_step)).item()
 
 def compute_mass_matrix_sqrt_from_M(mass_matrix_M):
     if mass_matrix_M is None: return None
@@ -214,6 +226,9 @@ def compute_inverse_mass_from_M(mass_matrix_M):
         raise ValueError(f"Mass matrix M is singular: {e}")
 
 def _kinetic_energy_hmc(p_actual, inv_mass_matrix_M_inv): # p_actual ~ N(0,M)
+    
+    # print(inv_mass_matrix_M_inv, inv_mass_matrix_M_inv.ndim)
+    
     if inv_mass_matrix_M_inv is None: # M=I
         return 0.5 * (p_actual**2).sum(dim=-1)
     # p_actual: (B,D), inv_mass_matrix_M_inv can be (D), (B,D), (D,D), (B,D,D)
@@ -226,20 +241,36 @@ def _kinetic_energy_hmc(p_actual, inv_mass_matrix_M_inv): # p_actual ~ N(0,M)
             M_inv_p = (inv_mass_matrix_M_inv @ p_actual.unsqueeze(-1)).squeeze(-1)
             return 0.5 * (p_actual * M_inv_p).sum(dim=-1)
     elif inv_mass_matrix_M_inv.ndim == 3: # (B,D,D)
-        M_inv_p = torch.bmm(inv_mass_matrix_M_inv, p_actual.unsqueeze(-1)).squeeze(-1)
+        M_inv_p = (inv_mass_matrix_M_inv @ p_actual.unsqueeze(-1)).squeeze(-1)
         return 0.5 * (p_actual * M_inv_p).sum(dim=-1)
     raise ValueError("Invalid inv_mass_matrix_M_inv shape")
 
-def _dKE_dp_actual_hmc(p_actual, inv_mass_matrix_M_inv): # dK/dp_actual = M^-1 p_actual
-    if inv_mass_matrix_M_inv is None: return p_actual
-    if inv_mass_matrix_M_inv.ndim == 1: return p_actual * inv_mass_matrix_M_inv
-    elif inv_mass_matrix_M_inv.ndim == 2:
-        if inv_mass_matrix_M_inv.shape[0] == p_actual.shape[0]: return p_actual * inv_mass_matrix_M_inv
-        else: return (inv_mass_matrix_M_inv @ p_actual.unsqueeze(-1)).squeeze(-1)
-    elif inv_mass_matrix_M_inv.ndim == 3:
-        return torch.bmm(inv_mass_matrix_M_inv, p_actual.unsqueeze(-1)).squeeze(-1)
-    raise ValueError("Invalid inv_mass_matrix_M_inv shape")
+def _dKE_dp_actual_hmc(p, inv_mass_matrix): # dK/dp_actual = M^-1 p_actual
 
+    if inv_mass_matrix is None:
+        return p
+    
+    if inv_mass_matrix.ndim == 1: # Diagonal inverse (D)
+        return p * inv_mass_matrix
+
+    elif inv_mass_matrix.ndim == 2:
+        if inv_mass_matrix.shape[0] == p.shape[0] and \
+           inv_mass_matrix.shape[1] == p.shape[1]: # Batch of diagonals (B,D)
+            return p * inv_mass_matrix
+        
+        elif inv_mass_matrix.shape[0] == p.shape[1] and \
+             inv_mass_matrix.shape[1] == p.shape[1]: # Full inverse (D,D) shared
+            return (inv_mass_matrix @ p.unsqueeze(-1)).squeeze(-1)
+        else:
+        
+            raise ValueError(f"Ambiguous inv_mass_matrix shape {inv_mass_matrix.shape} for p shape {p.shape}")
+    
+    elif inv_mass_matrix.ndim == 3: # Batch of full inverse (B,D,D)
+        return (inv_mass_matrix @ p.unsqueeze(-1)).squeeze(-1)
+    
+    else:
+        raise ValueError(f"Invalid inv_mass_matrix ndim: {inv_mass_matrix.ndim}")
+    
 def _hamiltonian_hmc(q, p_actual, log_prob_fn_q, inv_mass_matrix_M_inv):
     potential = -log_prob_fn_q(q)
     kinetic = _kinetic_energy_hmc(p_actual, inv_mass_matrix_M_inv)
@@ -248,17 +279,22 @@ def _hamiltonian_hmc(q, p_actual, log_prob_fn_q, inv_mass_matrix_M_inv):
 def _leapfrog_hmc(q_curr, p_actual_curr, step_size_val, n_steps,
                   log_grad_fn_q, inv_mass_matrix_M_inv,
                   q_min_bounds=None, q_max_bounds=None): # q_min/max are for parameters q
+    
     q = q_curr.clone()
     p_actual = p_actual_curr.clone()
+
     step_size_val_t = torch.tensor(step_size_val, device=q.device, dtype=q.dtype)
+
     if q.ndim > 1 and step_size_val_t.ndim == 0 : # if step_size is scalar but q is batched
         step_size_val_t = step_size_val_t.repeat(q.shape[0]).unsqueeze(-1) # (B,1) for broadcasting with grads
     elif step_size_val_t.ndim == 1 and q.ndim > 1 : # step_size is (B)
         step_size_val_t = step_size_val_t.unsqueeze(-1) # (B,1)
 
     grad_potential_q = -log_grad_fn_q(q) # V_g = - d(logP)/dq; dP/dt = -V_g
+    # print('grad_potential_q: ', grad_potential_q.shape)
 
     p_actual = p_actual - 0.5 * step_size_val_t * grad_potential_q # p_actual update: dp/dt = -dV/dq
+    # print('p_actual: ', p_actual.shape, step_size_val_t.shape, step_size_val_t)
 
     for _ in range(n_steps - 1):
         q = q + step_size_val_t * _dKE_dp_actual_hmc(p_actual, inv_mass_matrix_M_inv) # dq/dt = dK/dp = M^-1 p_actual
@@ -278,6 +314,7 @@ def _leapfrog_hmc(q_curr, p_actual_curr, step_size_val, n_steps,
         p_actual = p_actual - step_size_val_t * grad_potential_q_new
     
     q = q + step_size_val_t * _dKE_dp_actual_hmc(p_actual, inv_mass_matrix_M_inv)
+    # print('q: ', q.shape)
     if q_min_bounds is not None and q_max_bounds is not None: # Final boundary check for q
         for dim_i in range(q.shape[-1]):
             crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
@@ -290,32 +327,36 @@ def _leapfrog_hmc(q_curr, p_actual_curr, step_size_val, n_steps,
                 # p_actual[crossed_max, dim_i] = 0
     
     grad_potential_q_final = -log_grad_fn_q(q)
+    # print('grad_potential_q_final: ', grad_potential_q_final.shape)
     p_actual = p_actual - 0.5 * step_size_val_t * grad_potential_q_final
     
     return q, -p_actual # Negate momentum for detailed balance
 
 def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
-                     q_init, # Initial q (Phi_CMB) [B_chains, D_phi]
+                     phi_init, # Initial q (Phi_CMB) [B_chains, D_phi]
                      mass_matrix_M_input=None, # Mass matrix M [B_chains, D_phi, D_phi] or [D_phi,D_phi] or [D_phi] or None
                      step_size_initial=0.01, # scalar
-                     n_leapfrog_steps=10, # int or tuple for random range
+                     n_leapfrog_steps=5, # int or tuple for random range
                      num_samples_chain=1, # samples to return per chain (after burn-in)
-                     num_burnin_steps_hmc=0, # HMC's own burn-in for adaptation
+                     num_burnin_steps_hmc=2, # HMC's own burn-in for adaptation
                      adapt_step_size=True,
                      adapt_mass_matrix=False, # Whether to adapt M during HMC burn-in
                      num_adapt_steps_total=50, # Total steps for adaptation phase
-                     q_min_bounds=None, q_max_bounds=None, # Tensors [D_phi]
+                     phi_min_bounds=None, 
+                     phi_max_bounds=None, # Tensors [D_phi]
                      verbose=False):
     
-    q = q_init.clone().detach()
+    q = phi_init.clone().detach()
     device = q.device
     num_chains, dim_phi = q.shape
 
     # Initialize M, M_sqrt, M_inv
     current_M = mass_matrix_M_input.clone().detach() if mass_matrix_M_input is not None else None
-    if current_M is not None and current_M.ndim == dim_phi: # Shared M [D,D] or [D]
-        current_M = current_M.unsqueeze(0).repeat(num_chains, *((1,)*(current_M.ndim)))
+    # if current_M is not None and current_M.ndim == dim_phi: # Shared M [D,D] or [D]
+    #     current_M = current_M.unsqueeze(0).repeat(num_chains, *((1,)*(current_M.ndim)))
+    #     current_M = current_M.squeeze(0)
     
+    # print('current_M: ', current_M.shape)
     inv_mass_matrix_M_inv = compute_inverse_mass_from_M(current_M)
     mass_matrix_M_sqrt = compute_mass_matrix_sqrt_from_M(current_M)
 
@@ -360,13 +401,16 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
         q_prop, p_actual_prop = _leapfrog_hmc(
             q, p_actual, current_step_sizes_per_chain, current_n_leap,
             log_grad_fn, inv_mass_matrix_M_inv,
-            q_min_bounds, q_max_bounds
+            phi_min_bounds, phi_max_bounds
         )
 
         # 3. Metropolis-Hastings
         H_initial = _hamiltonian_hmc(q, p_actual_initial, log_prob_fn, inv_mass_matrix_M_inv)
         H_proposed = _hamiltonian_hmc(q_prop, p_actual_prop, log_prob_fn, inv_mass_matrix_M_inv)
-        
+
+        # print(q.shape, q_prop.shape, p_actual_initial.shape, p_actual_prop.shape)
+        # print('H: ', H_initial.shape, H_proposed.shape)
+
         log_accept_ratio = H_initial - H_proposed # For N(0,M) momentum, proposal is symmetric
         
         # Handle NaNs/Infs in log_accept_ratio (e.g. from out of bounds proposals)
@@ -376,6 +420,7 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
         u = torch.rand(num_chains, device=device)
         accepted_mask = u < accept_prob
         
+        # print('accpt/q: ', accepted_mask.shape, q.shape)
         q[accepted_mask] = q_prop[accepted_mask].detach() # Update q for accepted proposals
         acceptance_rates.append(accepted_mask.float().mean().item())
 
@@ -385,9 +430,7 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
                 # The __call__ method for step_size_adapter from GDiff style HMC
                 # takes (current_adapt_step, accept_prob_batch, total_adapt_steps)
                 # Here, num_burnin_steps_hmc acts as total_adapt_steps for this HMC call
-                current_step_sizes_per_chain = step_size_adapter(
-                    i_iter, accepted_mask, num_burnin_steps_hmc
-                )
+                current_step_sizes_per_chain = step_size_adapter.update(accept_prob.mean().item())
 
             if adapt_mass_matrix:
                 q_collected_for_adapt_M.append(q.clone().detach())
@@ -428,7 +471,8 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
 
     final_q_samples = torch.stack(collected_samples_q, dim=1) if collected_samples_q else q.unsqueeze(1) # [B_chains, N_samples_chain, D_phi]
     
-    final_step_size = current_step_sizes_per_chain[0].item() # Report one step size
+    # print(current_step_sizes_per_chain, current_step_sizes_per_chain.shape)
+    final_step_size = current_step_sizes_per_chain.item() # Report one step size
     if adapt_step_size and step_size_adapter and num_burnin_steps_hmc > 0 :
         final_step_size = step_size_adapter.get_final_averaged_step_size()
 
