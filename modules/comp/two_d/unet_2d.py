@@ -74,13 +74,13 @@ class SelfAttention2D(nn.Module):
         return self.to_out(out)
 
 class TimeEmbedding2D(nn.Module):
-    def __init__(self, embed_size):
+    def __init__(self, channels):
         super().__init__()
-        self.embed_size = embed_size
+        self.channels = channels
 
     def forward(self, t):
         device = t.device
-        half_dim = self.embed_size // 2
+        half_dim = self.channels // 2
         inv_freq = 1.0 / (10000 ** (torch.arange(0, half_dim, device=device).float() / half_dim))
         t = t.unsqueeze(-1)  # [B, 1]
         sinusoid = t * inv_freq  # [B, D/2]
@@ -160,10 +160,10 @@ class Unet2DGDiff(nn.Module):
 
         # Embeddings
         self.time_embeddings = nn.ModuleList([
-            TimeEmbedding2D(nc_2, embed_size),
-            TimeEmbedding2D(nc_3, embed_size),
-            TimeEmbedding2D(nc_4, embed_size),
-            TimeEmbedding2D(nc_5, embed_size)
+            TimeEmbedding2D(nc_2),
+            TimeEmbedding2D(nc_3),
+            TimeEmbedding2D(nc_4),
+            TimeEmbedding2D(nc_5)
         ])
 
         self.alpha_embeddings = nn.ModuleList([
@@ -187,10 +187,10 @@ class Unet2DGDiff(nn.Module):
         ])
 
         self.time_embeddings_up = nn.ModuleList([
-            TimeEmbedding2D(nc_4, embed_size),
-            TimeEmbedding2D(nc_3, embed_size),
-            TimeEmbedding2D(nc_2, embed_size),
-            TimeEmbedding2D(nc_1, embed_size)
+            TimeEmbedding2D(nc_4),
+            TimeEmbedding2D(nc_3),
+            TimeEmbedding2D(nc_2),
+            TimeEmbedding2D(nc_1)
         ])
 
         self.alpha_embeddings_up = nn.ModuleList([

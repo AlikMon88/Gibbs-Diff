@@ -3,7 +3,5 @@ gdiff-env-2/
 gdiff-env-wsl/
 .env
 
-/modules/comp/KAIR
-/data/archive.zip
-/data
-/saves
+data/
+saves/
