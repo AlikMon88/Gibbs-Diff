@@ -127,7 +127,8 @@ def log_likelihood_cmb_phi(phi_cmb_batch,
                            lmap_fourier, 
                            lmax_camb,
                            psd_regularizer=1e-30): # Increased regularizer
-    batch_size = epsilon_cmb_batch.shape[0]
+    
+    batch_size = phi_cmb_batch.shape[0]
     device = epsilon_cmb_batch.device
     log_likelihood_vals = torch.zeros(batch_size, device=device)
 
@@ -146,6 +147,8 @@ def log_likelihood_cmb_phi(phi_cmb_batch,
     epsilon_fourier_batch_torch = torch.from_numpy(epsilon_fourier_numpy_batch.astype(np.complex64)).to(device)
     
     abs_epsilon_fourier_sq = torch.abs(epsilon_fourier_batch_torch)**2
+    
+    print('phi_cmb_batch: ', phi_cmb_batch.shape)
 
     for i in range(batch_size):
         sigma_cmb_i, H0_i, ombh2_i = phi_cmb_batch[i, 0], phi_cmb_batch[i, 1], phi_cmb_batch[i, 2]
@@ -156,6 +159,7 @@ def log_likelihood_cmb_phi(phi_cmb_batch,
         log_det_term = torch.sum(torch.log(s_phi_k_2d_i_reg))
         chi_sq_term  = torch.sum(abs_epsilon_fourier_sq[i] / s_phi_k_2d_i_reg)
         log_likelihood_vals[i] = -0.5 * (log_det_term + chi_sq_term)
+
     return log_likelihood_vals
 
 def get_phi_cmb_parameter_bounds(sigma_min = SIGMA_CMB_PRIOR_MIN, sigma_max = SIGMA_CMB_PRIOR_MAX, h0_min = H0_PRIOR_MIN, h0_max = H0_PRIOR_MAX, ombh2_min = OMBH2_PRIOR_MIN, ombh2_max = OMBH2_PRIOR_MAX, device='cpu'):

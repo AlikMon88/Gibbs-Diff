@@ -167,26 +167,22 @@ class GibbsDiff2D_cosmo(nn.Module):
         is closest to the provided physical sigma_CMB values.
         This is based on your interpretation for starting ancestral sampling.
         """
-        # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
-        # Let's use sigma_t^2 = 1 - alpha_bar_t (variance of noise added to x_0 to get x_t if x_0 has unit variance)
-        # Or, if model predicts epsilon, then noise added to x_0 is sqrt(1-a_bar_t)*epsilon.
-        # If x_t = sqrt(a_bar_t)x_0 + sqrt(1-a_bar_t)eps, then var(x_t|x_0) = 1-a_bar_t
-        # So, effective sigma_ddpm = sqrt(1 - alpha_bar_t_ddpm)
+        # # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
+        # ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
         
-        # The sigma_CMB is an amplitude, its square is related to power/variance.
-        # This matching is heuristic. A common choice for "noise level" sigma in DDPM is sqrt(1-alpha_bar)/sqrt(alpha_bar)
-        # Or simply sqrt(1-alpha_bar) if thinking about variance of added noise to x0.
-        # Let's use the one from your original code: sqrt((1-alpha_bar_t)/alpha_bar_t)
+        # # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
+        # diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
+        # closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
+
+        ###################################
+
+        alpha_bar_t_ddpm = self.alpha_bar_t_ddpm.to(self.device)
+        all_noise_levels = torch.sqrt((1-alpha_bar_t_ddpm)/alpha_bar_t_ddpm).reshape(-1, 1).repeat(1, sigma_cmb_values.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
+        closest_timestep = torch.argmin(torch.abs(all_noise_levels - sigma_cmb_values), dim=0)
+
+        return closest_timestep    
         
-        ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
-        
-        # sigma_cmb_values is [B_chains], ddpm_noise_levels is [T_ddpm]
-        # We want to find for each sigma_cmb_value, the closest ddpm_noise_level
-        # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
-        diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
-        closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
-        
-        return closest_ddpm_t_indices # These are the t_eff to start DDPM from
+        # return closest_ddpm_t_indices # These are the t_eff to start DDPM from
 
     @torch.no_grad()
     def denoise_1step_ancestral(self, z_t, t_ddpm, phi_cmb_cond): # t_ddpm is a scalar tensor
@@ -303,11 +299,18 @@ class GibbsDiff2D_cosmo(nn.Module):
             assert phi_cmb_current.shape == (total_chains, 3)
         else:
             # Sample from prior or a smarter initialization
-            s_init = torch.rand(total_chains, 1, device=device) * (SIGMA_CMB_PRIOR_MAX - SIGMA_CMB_PRIOR_MIN) + SIGMA_CMB_PRIOR_MIN
-            h_init = torch.rand(total_chains, 1, device=device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
-            o_init = torch.rand(total_chains, 1, device=device) * (OMBH2_PRIOR_MIN - OMBH2_PRIOR_MIN) + OMBH2_PRIOR_MIN
+            s_init = torch.rand(1, 1, device=device) * (SIGMA_CMB_PRIOR_MAX - SIGMA_CMB_PRIOR_MIN) + SIGMA_CMB_PRIOR_MIN
+            s_init = s_init.repeat(total_chains, 1)
+
+            h_init = torch.rand(1, 1, device=device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
+            h_init = h_init.repeat(total_chains, 1)
+
+            o_init = torch.rand(1, 1, device=device) * (OMBH2_PRIOR_MIN - OMBH2_PRIOR_MIN) + OMBH2_PRIOR_MIN
+            o_init = o_init.repeat(total_chains, 1)
+
             phi_cmb_current = torch.cat([s_init, h_init, o_init], dim=-1) # [B_total, 3]
 
+        print(phi_cmb_current.shape)
         phi_cmb_history = []
         x_dust_history = []
         
@@ -344,6 +347,7 @@ class GibbsDiff2D_cosmo(nn.Module):
                     
                     log_l = log_likelihood_cmb_phi(
                         phi_cmb_trial[valid_prior_mask],
+                        # phi_cmb_trial,
                         estimated_cmb_residual, # Pass only relevant residuals
                         self.WCS,
                         self.lmap_fourier, 
@@ -420,15 +424,19 @@ class GibbsDiff2D_cosmo(nn.Module):
                 phi_min_bounds=phi_min_bounds, # Pass bounds to HMC
                 phi_max_bounds=phi_max_bounds
             )
-            # sample_hmc_v2 returns the last sample.
-            # If chain_length > 1, phi_cmb_new would be [B_total, chain_length_hmc, 3]
-            # We want the last sample from the HMC chain.
-            if phi_cmb_new.ndim == 3 and phi_cmb_new.shape[1] == self.hmc_chain_length:
-                phi_cmb_current = phi_cmb_new[:, -1, :].detach() # Take last HMC sample
-            elif phi_cmb_new.ndim == 2: # if chain_length was 1
-                phi_cmb_current = phi_cmb_new.detach()
-            else:
-                raise ValueError("Unexpected shape from HMC sampler for phi_cmb_new")
+            
+            ''' Posterior-Distribution Problem'''
+            # # sample_hmc_v2 returns the last sample.
+            # # If chain_length > 1, phi_cmb_new would be [B_total, chain_length_hmc, 3]
+            # # We want the last sample from the HMC chain.
+            # if phi_cmb_new.ndim == 3 and phi_cmb_new.shape[1] == self.hmc_chain_length:
+            #     phi_cmb_current = phi_cmb_new[:, -1, :].detach() # Take last HMC sample
+            # elif phi_cmb_new.ndim == 2: # if chain_length was 1
+            #     phi_cmb_current = phi_cmb_new.detach()
+            # else:
+            #     raise ValueError("Unexpected shape from HMC sampler for phi_cmb_new")
+
+            phi_cmb_current = phi_cmb_new.detach()
 
             # Update HMC step size and inv mass matrix if they were adapted
             if adapt_step_size and adapt_mass_matrix:
