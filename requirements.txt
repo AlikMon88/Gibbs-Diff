@@ -3,7 +3,7 @@ aiohappyeyeballs==2.4.6
 aiohttp==3.11.12
 aiosignal==1.3.2
 arviz==0.20.0
-astropy==7.1.0
+astropy ## version change
 astropy-iers-data==0.2025.6.2.0.38.23
 asttokens==3.0.0
 attrs==25.1.0

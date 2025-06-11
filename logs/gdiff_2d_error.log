@@ -1,0 +1,26 @@
+The following values were not passed to `accelerate launch` and had defaults used instead:
+	`--mixed_precision` was set to a value of `'no'`
+	`--dynamo_backend` was set to a value of `'no'`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate config`.
+Traceback (most recent call last):
+  File "/home/am3353/python/Python-3.10.12/Lib/runpy.py", line 187, in _run_module_as_main
+    mod_name, mod_spec, code = _get_module_details(mod_name, _Error)
+  File "/home/am3353/python/Python-3.10.12/Lib/runpy.py", line 157, in _get_module_details
+    code = loader.get_code(mod_name)
+  File "<frozen importlib._bootstrap_external>", line 1017, in get_code
+  File "<frozen importlib._bootstrap_external>", line 947, in source_to_code
+  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+  File "/home/am3353/Gibbs-Diff/modules/main_run.py", line 116
+    else:
+    ^
+IndentationError: expected an indented block after 'elif' statement on line 114
+Traceback (most recent call last):
+  File "/home/am3353/Gibbs-Diff/gdiff-env-csd3/bin/accelerate", line 8, in <module>
+    sys.exit(main())
+  File "/home/am3353/Gibbs-Diff/gdiff-env-csd3/lib/python3.10/site-packages/accelerate/commands/accelerate_cli.py", line 50, in main
+    args.func(args)
+  File "/home/am3353/Gibbs-Diff/gdiff-env-csd3/lib/python3.10/site-packages/accelerate/commands/launch.py", line 1213, in launch_command
+    simple_launcher(args)
+  File "/home/am3353/Gibbs-Diff/gdiff-env-csd3/lib/python3.10/site-packages/accelerate/commands/launch.py", line 795, in simple_launcher
+    raise subprocess.CalledProcessError(returncode=process.returncode, cmd=cmd)
+subprocess.CalledProcessError: Command '['/home/am3353/Gibbs-Diff/gdiff-env-csd3/bin/python', '-m', 'modules.main_run', '--mode=2D']' returned non-zero exit status 1.

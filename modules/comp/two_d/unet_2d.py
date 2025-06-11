@@ -131,7 +131,7 @@ class Unet2DGDiff(nn.Module):
         self.dim = dim
         self.channels = channels
         if not device:
-            self.device = 'cpu' if not torch.cuda.is_available() else 'cpu'
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         # Embed size for time/phi embeddings
         H = 32  # Typical spatial size for image features

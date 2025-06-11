@@ -10,3 +10,8 @@ https://keras.io/examples/generative/ddpm/
 Cold Diffusion
 https://arxiv.org/abs/2208.09392
 ?Even when using completely deterministic degradations (e.g., blur, masking, and more), the training and test-time update rules that underlie diffusion models can be easily generalized to create generative models.
+
+CSD3:
+
+1. Need to create Python 3.12 env
+2. RUN slurm train for '2D' TONIGHT 

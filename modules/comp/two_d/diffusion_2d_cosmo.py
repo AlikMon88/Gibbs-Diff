@@ -25,6 +25,7 @@ from ...utils.noise_create_2d import get_colored_noise_2d
 from ...utils.hmc_cosmo import *
 
 from pixell import enmap
+from ...utils.cosmo_create import get_cmb_noise_batch
 
 # Helper functions for noise schedule (can be kept from your original)
 def extract(a, t, x_shape):
@@ -133,7 +134,12 @@ class GibbsDiff2D_cosmo(nn.Module):
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
 
         # 2. Sample standard Gaussian noise for the DDPM forward process
-        ddpm_noise_eps = torch.randn_like(clean_dust_batch, device=self.device)
+        # ddpm_noise_eps = torch.randn_like(clean_dust_batch, device=self.device)
+
+        ''' ADD CMB gaussian like distribution (noise) '''
+        ddpm_noise_eps = get_cmb_noise_batch(phi_cmb_batch, device=self.device)  # Shape: (B, C, H, W)
+
+        assert clean_dust_batch.shape == ddpm_noise_eps.shape 
 
         # 3. Create z_t (DDPM noised dust map)
         # x_t = sqrt(alpha_hat) * x_0 + sqrt(1-alpha_hat) * eps

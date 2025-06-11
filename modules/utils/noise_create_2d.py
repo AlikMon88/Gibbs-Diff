@@ -46,46 +46,55 @@ def load_images_cv2(image_paths, size=(64, 64)):
 
 def get_colored_noise_2d(shape, phi=0, device=None):
     """
+    Generate 2D colored noise with a given power spectrum exponent phi.
+
     Args:
-        shape: (int tuple or torch.Size) shape of the image
-        phi: (float or torch.Tensor of shape (B,1)) power spectrum exponent 
-        ret_psd: (bool) if True, return the power spectrum
+        shape: (tuple or torch.Size) expected to be (B, C, H, W), with H == W.
+        phi: float or torch.Tensor of shape (B, 1); power spectrum exponent.
+        device: optional torch device.
+
     Returns:
-        noise: colored noise
-        ps: power spectrum
+        noises: torch.Tensor of shape (B, C, H, W) — colored noise.
+        S: torch.Tensor of shape (B, C, H, W) — normalized power spectrum.
     """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    if not device:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu' 
+    assert len(shape) == 4 and shape[2] == shape[3], "Input shape must be (B, C, H, H)"
+    B, C, N, _ = shape
 
-    assert len(shape) == 4 # (B, C, H, W)
-    assert shape[2] == shape[3] # (B, C, H, W)
-    if isinstance(phi, float) or isinstance(phi, int):
-        phi = torch.tensor(phi).to(device).repeat(shape[0], 1)
+    if isinstance(phi, (float, int)):
+        phi = torch.tensor(phi, device=device).repeat(B, 1)
     else:
-        assert phi.shape == (shape[0], 1)
-   
-    N = shape[2]
+        phi = phi.to(device)
+        assert phi.shape == (B, 1), "phi must be of shape (B, 1)"
 
-    wn = torch.fft.fftfreq(N).to(device).reshape((N, 1))
-    S = torch.zeros((shape[0], shape[1], N, N))
-    for i in range(2): ## we are in 2D
-        S += torch.moveaxis(wn, 0, i).pow(2)
+    # Create 2D frequency grid
+    freq = torch.fft.fftfreq(N, device=device).reshape(N, 1)
+    freq_grid = torch.zeros((N, N), device=device)
+    for i in range(2):  # For 2D grid
+        freq_grid += torch.moveaxis(freq, 0, i).pow(2)
 
-    ## phi - scaling frequency content (control frequency characteristics of noise)
-    S.pow_(phi.reshape(-1, 1, 1, 1)/2)
-    S[:, :, 0, 0] = 1.0
-    S.div_(torch.mean(S, dim=(-1, -2), keepdim=True))  # Normalize S to keep std = 1
+    # Expand to match shape (B, C, N, N)
+    S = freq_grid[None, None, :, :].repeat(B, C, 1, 1)
+    S = S.pow(phi.view(B, 1, 1, 1) / 2)
+    S[:, :, 0, 0] = 1.0  # Avoid division by zero at DC
 
-    X_white = torch.fft.fftn(torch.randn(shape, device=device), dim=(2,3))
+    # Normalize power spectrum
+    S /= S.mean(dim=(-2, -1), keepdim=True)
+
+    # Generate white noise in frequency domain
+    X_white = torch.fft.fftn(torch.randn(shape, device=device), dim=(2, 3))
     X_shaped = X_white * torch.sqrt(S)
-    noises = torch.fft.ifftn(X_shaped, dim=(2,3)).real
-    
+
+    # Inverse FFT to get colored noise
+    noises = torch.fft.ifftn(X_shaped, dim=(2, 3)).real
+
     return noises, S
-    
+        
 def create_2d_data_colored(image_paths, n_samples=None, phi=1.0, decay=1.0, sigma=0.5, size=(64, 64), is_plot=False):
     """
-    Applies colored noise to RGB images using diffusion-style mixing.
+    Applies colored noise to RGB images using diffusion-style mixing. (create data on CPU)
 
     Args:
         image_paths: list of paths to RGB images
@@ -119,7 +128,7 @@ def create_2d_data_colored(image_paths, n_samples=None, phi=1.0, decay=1.0, sigm
 
     # Generate 2D colored noise
     noise, _ = get_colored_noise_2d((B, C, H, W), phi=phi)
-    noise = decay * noise
+    noise = decay * noise.cpu()
 
     # Broadcast sigma
     if isinstance(sigma, (float, int)):

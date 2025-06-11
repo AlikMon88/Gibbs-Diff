@@ -6,22 +6,14 @@ from tqdm import tqdm
 import zipfile
 
 def download_file(url, dest_path):
-    """Download a file from a URL with a progress bar."""
+    """Download a file from a URL without a progress bar."""
     response = requests.get(url, stream=True)
     response.raise_for_status()
-    total = int(response.headers.get('content-length', 0))
-    with open(dest_path, 'wb') as file, tqdm(
-        desc=f"Downloading {os.path.basename(dest_path)}",
-        total=total,
-        unit='iB',
-        unit_scale=True,
-        unit_divisor=1024,
-    ) as bar:
+    with open(dest_path, 'wb') as file:
         for chunk in response.iter_content(chunk_size=1024):
             if chunk:
                 file.write(chunk)
-                bar.update(len(chunk))
-
+                
 if __name__ == '__main__':
     # Ensure dependencies: requests, tqdm
     try:
