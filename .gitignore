@@ -2,8 +2,8 @@ gdiff-env/
 gdiff-env-2/
 gdiff-env-wsl/
 gdiff-env-csd3/
+saves/
 
 .env
 
 data/
-saves/
