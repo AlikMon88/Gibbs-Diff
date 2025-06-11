@@ -129,6 +129,8 @@ class GibbsDiff2D_cosmo(nn.Module):
 
         phi_cmb_batch = torch.concatenate([phi_h0_batch, phi_omb_batch], dim=1)
 
+        cmb_noise_prefill = lambda phi_cmb: get_cmb_noise_batch(phi_cmb_batch=phi_cmb, sub_shape=self.image_size_hw, device=self.device)
+
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
@@ -136,10 +138,15 @@ class GibbsDiff2D_cosmo(nn.Module):
         # 2. Sample standard Gaussian noise for the DDPM forward process
         # ddpm_noise_eps = torch.randn_like(clean_dust_batch, device=self.device)
 
-        ''' ADD CMB gaussian like distribution (noise) '''
-        ddpm_noise_eps = get_cmb_noise_batch(phi_cmb_batch, device=self.device)  # Shape: (B, C, H, W)
-
-        assert clean_dust_batch.shape == ddpm_noise_eps.shape 
+        ''' 
+        ADD CMB gaussian like distribution (noise) dynamically [REALLY-SLOW]
+        OR
+        I can uniformly sample from secondary memory created_data/cmb_maps + params 
+        ''' # Shape: (B, C, H, W) | do I standardize it?
+        # ddpm_noise_eps = get_cmb_noise_batch(phi_cmb_batch, device=self.device)  
+        CMB_maps = cmb_noise_prefill(phi_cmb_batch)
+        ddpm_noise_eps = (CMB_maps - CMB_maps.mean(dim=(2, 3), keepdim=True)) / CMB_maps.std(dim=(2, 3), keepdim=True)  ## standardize ranges
+        ddpm_noise_eps = ddpm_noise_eps.float()
 
         # 3. Create z_t (DDPM noised dust map)
         # x_t = sqrt(alpha_hat) * x_0 + sqrt(1-alpha_hat) * eps

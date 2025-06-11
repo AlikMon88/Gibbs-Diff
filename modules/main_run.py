@@ -72,7 +72,7 @@ def get_hparams(mode = '1D'):
         'train_num_steps': 30000,
         'init_size': (64, 64),
         'diffusion_steps': 1000, ## ancestral sampling steps
-        'train_batch_size': 64,
+        'train_batch_size': 16,
         'infer_phi': 1.0,
         'infer_sigma': 0.2,
         'input_dim': 32,
@@ -85,14 +85,14 @@ def get_hparams(mode = '1D'):
     elif mode == 'cosmo': ## (PASS-SUBSHAPE)
         cosmo_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data'
         params = {
-        'train_num_steps': 50000,
-        'init_size': (64, 64),
+        'train_num_steps': 100,
+        'init_size': (16, 16),
         'diffusion_steps': 1000, ## ancestral sampling steps
         'train_batch_size': 32,
         'infer_H0': 72.0, ##
         'infer_sigma': 0.40,
         'infer_ombh2': 0.02,
-        'input_dim': 32,
+        'input_dim': 4,
         'learning_rate':1e-5,
         'cosmo_path': cosmo_path,
         'n_samples': 1000,
@@ -117,7 +117,7 @@ def get_data(params, mode = '1D'):
     
     elif mode == 'cosmo':
         ## observation = mixed-map, images = intersteller-dust, noise = CMB signal
-        observation, images, noise, _ = get_cosmo_data(n_samples=params['n_samples']) 
+        observation, images, noise, _ = get_cosmo_data(n_samples=params['n_samples'], sub_shape=params['init_size']) 
    
     else:
         raise ValueError('Wrong Mode Selected')

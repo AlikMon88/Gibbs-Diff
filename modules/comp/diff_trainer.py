@@ -164,7 +164,6 @@ class Trainer1D:
         adam_betas: tuple = (0.9, 0.99),
         save_and_sample_every: int = 1000,
         num_samples: int = 25,
-        results_folder: str = './results',
         max_grad_norm: float = 1.0,
         seed: int = 42
     ):
@@ -176,7 +175,6 @@ class Trainer1D:
         self.accelerator = Accelerator(
             gradient_accumulation_steps=gradient_accumulate_every,
             log_with="tensorboard",
-            project_dir=results_folder
         )
         set_seed(seed)
 

@@ -16,6 +16,7 @@ warnings.filterwarnings('ignore')
 
 from astropy.io import fits # Example for FITS files
 import os
+import re
 
 # --- Configuration ---
 # Map properties
@@ -187,7 +188,7 @@ def get_camb_cls(H0, ombh2, omch2=OMCH2_FID, omk=OMK_FID, tau=TAU_FID,
     cl_tt[1] = 0
     return cl_tt # Units of uK^2
 
-def generate_cmb_map(cl_tt, sigma_cmb_amp, sub_shape = (64, 64), seed=None):
+def generate_cmb_map(cl_tt, sigma_cmb_amp=None, seed=None):
     """
     Generates a flat-sky CMB map realization from Cls using pixell.
     cl_tt should be the power spectrum D_l = l(l+1)C_l/2pi or C_l.
@@ -203,8 +204,11 @@ def generate_cmb_map(cl_tt, sigma_cmb_amp, sub_shape = (64, 64), seed=None):
     # If Sigma_Phi = sigma^2 * Sigma_phi_base, then C_l_effective = sigma^2 * C_l_base
     
     ''' Technically - the Sigma should only scale the diag-cov in log-post calc'''
-    scaled_cl_tt = cl_tt * (sigma_cmb_amp**2) # Scale power spectrum
-
+    if sigma_cmb_amp is None: 
+        scaled_cl_tt = cl_tt
+    else:
+        scaled_cl_tt = cl_tt * (sigma_cmb_amp**2)
+    
     # pixell.curvedsky.rand_map needs an array of Cls [TT, EE, BB, TE, ...]
     # For TT only:
     cls_for_randmap = np.zeros((1, len(scaled_cl_tt))) # Shape (1, nl) for just T
@@ -212,121 +216,83 @@ def generate_cmb_map(cl_tt, sigma_cmb_amp, sub_shape = (64, 64), seed=None):
     
     cmb_map_data = curvedsky.rand_map(SHAPE, WCS, cls_for_randmap, seed=seed)
     cmb_map_data = enmap.ndmap(cmb_map_data, WCS) # Returns a single map (T)
-    cmb_map_data = cv2.resize(cmb_map_data, sub_shape)
 
     return cmb_map_data
 
-# def get_cmb_noise_batch(phi_cmb_batch, device):
+def get_cmb_noise_batch(phi_cmb_batch, sub_shape, device):
 
-#     H0_batch, ombh2_batch = phi_cmb_batch[:, 0].cpu().numpy(), phi_cmb_batch[:, 1].cpu().numpy()
-#     cl_tt = get_camb_cls(H0_batch, ombh2_batch)
-
-#     cmb_map_data = generate_cmb_map(cl_tt, sigma_cmb_amp, sub_shape = (64, 64), seed=None)
-#     cmb_map_data = torch.tensor(np.array(cmb_map_data))
-    
-#     return cmb_map_data.to(device).unsqueeze(1)
-
-### ---------- NOISE-CREATE (batched) ------------------
-
-# ==============================================================================
-# BATCHED HELPER 1: Looped function for getting a batch of CAMB power spectra
-# ==============================================================================
-def get_camb_cls_batch(H0_batch, ombh2_batch, omch2=OMCH2_FID, omk=OMK_FID, 
-                       tau=TAU_FID, As=AS_FID, ns=NS_FID, lmax=LMAX):
-    """
-    Uses CAMB to calculate a batch of TT power spectra by looping over input parameters.
-
-    Args:
-        H0_batch (np.ndarray): Array of H0 values.
-        ombh2_batch (np.ndarray): Array of ombh2 values.
-    
-    Returns:
-        np.ndarray: A NumPy array of shape (batch_size, lmax + 1) containing TT power spectra.
-    """
-    all_cls = []
-    # This loop is necessary as CAMB computes one cosmology at a time.
-    for H0, ombh2 in zip(H0_batch, ombh2_batch):
-        pars = camb.CAMBparams()
-        pars.set_cosmology(H0=H0, ombh2=ombh2, omch2=omch2, omk=omk, tau=tau)
-        pars.InitPower.set_params(As=As, ns=ns, r=0)
-        pars.set_for_lmax(lmax, lens_potential_accuracy=0)
-
-        results = camb.get_results(pars)
-        powers = results.get_cmb_power_spectra(pars, CMB_unit='muK')
-        cl_tt = powers['total'][:, 0]
-
-        # Ensure correct length and remove monopole/dipole
-        if len(cl_tt) > lmax + 1:
-            cl_tt = cl_tt[:lmax+1]
-        elif len(cl_tt) < lmax + 1:
-            cl_tt = np.pad(cl_tt, (0, lmax + 1 - len(cl_tt)))
-            
-        cl_tt[0] = 0
-        cl_tt[1] = 0
-        all_cls.append(cl_tt)
-        
-    return np.array(all_cls)
-
-# ==============================================================================
-# BATCHED HELPER 2: Vectorized function for generating a batch of CMB maps
-# ==============================================================================
-def generate_cmb_map_batch(cl_tt_batch, sigma_cmb_amp, sub_shape=(64, 64), seed=None):
-    """
-    Generates a batch of flat-sky CMB map realizations from a batch of Cls.
-    This operation is fully vectorized.
-    """
-    batch_size = cl_tt_batch.shape[0]
-    
-    # 1. Define the map geometry for the target shape
-    # We create a shape (n_comp, height, width) where n_comp=1 for TT-only
-    map_shape, wcs = enmap.geometry(pos=np.deg2rad([[0,0],[1,1]]), shape=(1, *sub_shape), proj="car")
-    
-    # 2. Define the full output shape for the batch
-    full_batch_shape = (batch_size, *map_shape) # e.g., (16, 1, 64, 64)
-    
-    # 3. Scale the power spectra by the amplitude factor
-    scaled_cl_tt_batch = cl_tt_batch * (sigma_cmb_amp**2)
-    
-    # 4. Reshape power spectra for enmap: (batch, n_comp, n_comp, lmax)
-    # This shape allows enmap to generate correlated components, but here we only have one.
-    ps_batch_for_randmap = scaled_cl_tt_batch[:, None, None, :]
-    
-    # 5. Generate all maps in a single, efficient call
-    cmb_maps_batch = enmap.rand_map(full_batch_shape, wcs, ps_batch_for_randmap, seed=seed)
-    
-    return cmb_maps_batch
-
-
-# ==============================================================================
-# FINAL BATCHED FUNCTION: The main orchestrator
-# ==============================================================================
-def get_cmb_noise_batch(phi_cmb_batch, device, sigma_cmb_amp=1.0):
-    """
-    Generates a batch of CMB noise maps based on a batch of cosmological parameters.
-    This version is vectorized for efficient batch processing.
-
-    Args:
-        phi_cmb_batch (torch.Tensor): Tensor of cosmological parameters of shape (batch_size, 2).
-        device (torch.device): The device to place the final output tensor on.
-        sigma_cmb_amp (float): Amplitude scaling factor for the power spectrum.
-
-    Returns:
-        torch.Tensor: A batch of CMB maps of shape (batch_size, 1, height, width).
-    """
-    # 1. Extract parameters and move to CPU for CAMB
     H0_batch, ombh2_batch = phi_cmb_batch[:, 0].cpu().numpy(), phi_cmb_batch[:, 1].cpu().numpy()
-    
-    # 2. Get a batch of power spectra (this part is looped internally)
-    cl_tt_batch = get_camb_cls_batch(H0_batch, ombh2_batch)
+    cmb_map_data_batch = []
 
-    # 3. Generate all CMB maps in one vectorized operation
-    #    This returns an enmap.ndmap of shape (batch_size, 1, height, width)
-    cmb_map_data_batch = generate_cmb_map_batch(cl_tt_batch, sigma_cmb_amp, sub_shape=(64, 64))
+    ## LOOP
+    for H0, ombh2 in zip(H0_batch, ombh2_batch):
+        cl_tt = get_camb_cls(H0, ombh2)
+        cmb_map_data = generate_cmb_map(cl_tt, sigma_cmb_amp=None, seed=None)
+        cmb_map_data = cv2.resize(np.array(cmb_map_data), sub_shape)
+        cmb_map_data_batch.append(cmb_map_data)
     
-    # 4. Convert the final numpy-like array to a torch tensor directly on the target device
-    #    The channel dimension (axis 1) is already present.
-    return torch.as_tensor(cmb_map_data_batch, dtype=torch.float32, device=device)
+    cmb_map_data_batch = np.array(cmb_map_data_batch)
+    cmb_map_data_batch = torch.tensor(cmb_map_data_batch).to(device).unsqueeze(1)
+    
+    return cmb_map_data_batch
 
+#### -------- SECONDARY-RETRIEVAL ------------
+def load_random_sample_from_disk(cmb_dir, params_dir):
+    """
+    Loads a single, randomly selected CMB map and its corresponding parameter file from disk.
+
+    This function is ideal for use in a PyTorch Dataset to load data on-the-fly.
+
+    Args:
+        cmb_dir (str): The path to the directory containing 'cmb_xxxx.fits' files.
+        params_dir (str): The path to the directory containing 'params_xxxx.npy' files.
+
+    Returns:
+        tuple: A tuple containing:
+            - cmb_map (enmap.ndmap): The loaded CMB map as a NumPy-like array.
+            - params (np.ndarray): The corresponding parameters.
+        Returns (None, None) if directories are empty or a matching pair cannot be found.
+    """
+    # 1. Get a list of all available CMB map files in the directory.
+    try:
+        # We only consider files that match the expected pattern.
+        map_files = [f for f in os.listdir(cmb_dir) if f.startswith('cmb_') and f.endswith('.fits')]
+        if not map_files:
+            print(f"Warning: No CMB map files found in '{cmb_dir}'")
+            return None, None
+    except FileNotFoundError:
+        print(f"Error: The CMB directory was not found at '{cmb_dir}'")
+        return None, None
+
+    # 2. Choose one of the available map files uniformly at random.
+    random_map_filename = random.choice(map_files)
+
+    # 3. Extract the index number (e.g., '0123') from the filename using a regular expression.
+    # This is more robust than simple string splitting.
+    match = re.search(r'cmb_(\d+)\.fits', random_map_filename)
+    if not match:
+        print(f"Warning: Could not parse index from filename '{random_map_filename}'")
+        return None, None
+    
+    index_str = match.group(1) # The part of the string inside the parentheses in the regex
+
+    # 4. Construct the full paths for both the map and its corresponding parameter file.
+    map_filepath = os.path.join(cmb_dir, random_map_filename)
+    param_filename = f"params_{index_str}.npy"
+    param_filepath = os.path.join(params_dir, param_filename)
+    
+    # 5. Load the files from disk.
+    try:
+        cmb_map = enmap.read_map(map_filepath)
+        params = np.load(param_filepath)
+    except FileNotFoundError:
+        print(f"Error: Found map file '{map_filepath}', but could not find corresponding parameter file '{param_filepath}'")
+        return None, None
+    except Exception as e:
+        print(f"An error occurred while loading files: {e}")
+        return None, None
+
+    return cmb_map, params
 
 #### --------- DATASET-CREATION --------------
 

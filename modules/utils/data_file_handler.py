@@ -2,6 +2,7 @@ import numpy as np
 import os
 from pixell import enmap
 import re
+import cv2
 
 def tiny_imagenet_file_handler(source_path, return_path = True):
     train_path = os.path.join(source_path, 'tiny-imagenet-200/train')
@@ -25,7 +26,7 @@ def tiny_imagenet_file_handler(source_path, return_path = True):
         return train_image_path, test_image_path
     
 
-def get_cosmo_data(source_path='/home/am3353/Gibbs-Diff/data/cosmo/created_data', n_samples=1000):
+def get_cosmo_data(source_path='/home/am3353/Gibbs-Diff/data/cosmo/created_data', sub_shape=(64, 64), n_samples=1000):
     """
     Loads cosmological map data and their corresponding parameters from a directory structure.
 
@@ -68,6 +69,7 @@ def get_cosmo_data(source_path='/home/am3353/Gibbs-Diff/data/cosmo/created_data'
             try:
                 # enmap.read_map loads the FITS file into an ndmap (NumPy-like array)
                 loaded_map = enmap.read_map(map_path)
+                loaded_map = cv2.resize(np.array(loaded_map), sub_shape)
                 maps_dict[type_dir].append(loaded_map)
             except Exception as e:
                 print(f"Warning: Could not load or process file {map_path}. Error: {e}")
