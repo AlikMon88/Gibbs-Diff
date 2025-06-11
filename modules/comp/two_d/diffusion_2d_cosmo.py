@@ -25,8 +25,11 @@ from ...utils.noise_create_2d import get_colored_noise_2d
 from ...utils.hmc_cosmo import *
 
 from pixell import enmap
-from ...utils.cosmo_create import get_cmb_noise_batch
+from ...utils.cosmo_create import get_cmb_noise_batch, load_random_sample_from_disk_batch
 
+CMB_SOURCE_PATH = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
+PARAMS_SOURCE_PATH = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/params'
+    
 # Helper functions for noise schedule (can be kept from your original)
 def extract(a, t, x_shape):
     b, *_ = t.shape
@@ -116,21 +119,24 @@ class GibbsDiff2D_cosmo(nn.Module):
         phi_cmb_batch: [B, 3] tensor of (sigma_CMB, H0, ombh2)
         ddpm_timesteps: [B] tensor of DDPM timesteps
         """
+
         batch_size = clean_dust_batch.shape[0]
         
-        if phi_cmb_batch is None:
-            # sample phi_cmb sample between MIN_MAX range | shape (batch_size, 2)
-            phi_h0_batch = torch.rand(batch_size, 1, device=self.device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
-            phi_omb_batch = torch.rand(batch_size, 1, device=self.device) * (OMBH2_PRIOR_MIN - OMBH2_PRIOR_MIN) + OMBH2_PRIOR_MIN
+        # if phi_cmb_batch is None:
+        #     # sample phi_cmb sample between MIN_MAX range | shape (batch_size, 2)
+        #     phi_h0_batch = torch.rand(batch_size, 1, device=self.device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
+        #     phi_omb_batch = torch.rand(batch_size, 1, device=self.device) * (OMBH2_PRIOR_MIN - OMBH2_PRIOR_MIN) + OMBH2_PRIOR_MIN
 
-        elif isinstance(phi_cmb_batch[0], float) or isinstance(phi_cmb_batch[0], int):
-            phi_h0_batch = phi_cmb_batch[0] * torch.ones(batch_size, 1).to(self.device)
-            phi_omb_batch = phi_cmb_batch[1] * torch.ones(batch_size, 1).to(self.device)
+        # elif isinstance(phi_cmb_batch[0], float) or isinstance(phi_cmb_batch[0], int):
+        #     phi_h0_batch = phi_cmb_batch[0] * torch.ones(batch_size, 1).to(self.device)
+        #     phi_omb_batch = phi_cmb_batch[1] * torch.ones(batch_size, 1).to(self.device)
 
-        phi_cmb_batch = torch.concatenate([phi_h0_batch, phi_omb_batch], dim=1)
+        # phi_cmb_batch = torch.concatenate([phi_h0_batch, phi_omb_batch], dim=1)
 
-        cmb_noise_prefill = lambda phi_cmb: get_cmb_noise_batch(phi_cmb_batch=phi_cmb, sub_shape=self.image_size_hw, device=self.device)
-
+        ''' SECONDARY-MEM RETRIEVAL '''
+        CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
+        phi_cmb_batch = phi_cmb_batch.float()
+        
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
@@ -140,13 +146,15 @@ class GibbsDiff2D_cosmo(nn.Module):
 
         ''' 
         ADD CMB gaussian like distribution (noise) dynamically [REALLY-SLOW]
-        OR
         I can uniformly sample from secondary memory created_data/cmb_maps + params 
         ''' # Shape: (B, C, H, W) | do I standardize it?
-        # ddpm_noise_eps = get_cmb_noise_batch(phi_cmb_batch, device=self.device)  
-        CMB_maps = cmb_noise_prefill(phi_cmb_batch)
+        
+        # cmb_noise_prefill = lambda phi_cmb: get_cmb_noise_batch(phi_cmb_batch=phi_cmb, sub_shape=self.image_size_hw, device=self.device)
+        # CMB_maps = cmb_noise_prefill(phi_cmb_batch)
+        
         ddpm_noise_eps = (CMB_maps - CMB_maps.mean(dim=(2, 3), keepdim=True)) / CMB_maps.std(dim=(2, 3), keepdim=True)  ## standardize ranges
         ddpm_noise_eps = ddpm_noise_eps.float()
+
 
         # 3. Create z_t (DDPM noised dust map)
         # x_t = sqrt(alpha_hat) * x_0 + sqrt(1-alpha_hat) * eps

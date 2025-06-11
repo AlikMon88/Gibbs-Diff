@@ -507,10 +507,7 @@ class TrainerGDiff:
                     batch = batch.reshape(batch.shape[0], 1, -1)
                 
                 loss = self.model(batch)
-
-                # Log training loss
-                # self.accelerator.log({"train_loss": loss.item()}, step=self.step)
-                
+     
                 # 5. Backward pass handled by accelerator
                 self.accelerator.backward(loss)
 
@@ -554,7 +551,5 @@ class TrainerGDiff:
                 total_val_loss += gathered_loss.sum().item()
         
         avg_val_loss = total_val_loss / len(self.val_dl.dataset)
-        # self.accelerator.log({"val_loss": avg_val_loss}, step=self.step)
-        # self.accelerator.print(f"Step {self.step}: Validation Loss: {avg_val_loss:.4f}")
         
         return avg_val_loss

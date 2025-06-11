@@ -17,6 +17,8 @@ warnings.filterwarnings('ignore')
 from astropy.io import fits # Example for FITS files
 import os
 import re
+from pprint import pprint
+import random
 
 # --- Configuration ---
 # Map properties
@@ -188,7 +190,7 @@ def get_camb_cls(H0, ombh2, omch2=OMCH2_FID, omk=OMK_FID, tau=TAU_FID,
     cl_tt[1] = 0
     return cl_tt # Units of uK^2
 
-def generate_cmb_map(cl_tt, sigma_cmb_amp=None, seed=None):
+def generate_cmb_map(cl_tt, sub_shape=(64, 64), sigma_cmb_amp=None, seed=None):
     """
     Generates a flat-sky CMB map realization from Cls using pixell.
     cl_tt should be the power spectrum D_l = l(l+1)C_l/2pi or C_l.
@@ -216,10 +218,11 @@ def generate_cmb_map(cl_tt, sigma_cmb_amp=None, seed=None):
     
     cmb_map_data = curvedsky.rand_map(SHAPE, WCS, cls_for_randmap, seed=seed)
     cmb_map_data = enmap.ndmap(cmb_map_data, WCS) # Returns a single map (T)
-
+    cmb_map_data = cv2.resize(np.array(cmb_map_data), sub_shape)
+        
     return cmb_map_data
 
-def get_cmb_noise_batch(phi_cmb_batch, sub_shape, device):
+def get_cmb_noise_batch(phi_cmb_batch, device, sub_shape=(64, 64)):
 
     H0_batch, ombh2_batch = phi_cmb_batch[:, 0].cpu().numpy(), phi_cmb_batch[:, 1].cpu().numpy()
     cmb_map_data_batch = []
@@ -227,8 +230,7 @@ def get_cmb_noise_batch(phi_cmb_batch, sub_shape, device):
     ## LOOP
     for H0, ombh2 in zip(H0_batch, ombh2_batch):
         cl_tt = get_camb_cls(H0, ombh2)
-        cmb_map_data = generate_cmb_map(cl_tt, sigma_cmb_amp=None, seed=None)
-        cmb_map_data = cv2.resize(np.array(cmb_map_data), sub_shape)
+        cmb_map_data = generate_cmb_map(cl_tt, sub_shape, sigma_cmb_amp=None, seed=None)
         cmb_map_data_batch.append(cmb_map_data)
     
     cmb_map_data_batch = np.array(cmb_map_data_batch)
@@ -237,6 +239,7 @@ def get_cmb_noise_batch(phi_cmb_batch, sub_shape, device):
     return cmb_map_data_batch
 
 #### -------- SECONDARY-RETRIEVAL ------------
+
 def load_random_sample_from_disk(cmb_dir, params_dir):
     """
     Loads a single, randomly selected CMB map and its corresponding parameter file from disk.
@@ -284,7 +287,7 @@ def load_random_sample_from_disk(cmb_dir, params_dir):
     # 5. Load the files from disk.
     try:
         cmb_map = enmap.read_map(map_filepath)
-        params = np.load(param_filepath)
+        params = np.load(param_filepath, allow_pickle=True)
     except FileNotFoundError:
         print(f"Error: Found map file '{map_filepath}', but could not find corresponding parameter file '{param_filepath}'")
         return None, None
@@ -293,6 +296,110 @@ def load_random_sample_from_disk(cmb_dir, params_dir):
         return None, None
 
     return cmb_map, params
+
+def load_random_sample_from_disk_batch(cmb_dir, params_dir, batch_size, sub_shape=(64, 64), device=None):
+    """
+    Loads a random batch of CMB maps and their corresponding parameters from disk.
+
+    This function is optimized to be more robust by first finding all matching
+    map/parameter pairs before sampling. It's suitable for efficient batch
+    loading in deep learning workflows.
+
+    Args:
+        cmb_dir (str): The path to the directory containing 'cmb_xxxx.fits' files.
+        params_dir (str): The path to the directory containing 'params_xxxx.npy' files.
+        batch_size (int): The number of samples to load in the batch.
+
+    Returns:
+        tuple: A tuple containing:
+            - batched_cmb_maps (enmap.ndmap): A single map object with shape
+              (batch_size, num_channels, height, width).
+            - batched_params (np.ndarray): A NumPy array of corresponding
+              parameters with shape (batch_size, num_params).
+        Returns (None, None) if not enough valid pairs are found to form a batch
+        or if an error occurs.
+    """
+
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # 1. Find all available, valid, and matching file pairs.
+    try:
+        # Use sets for efficient intersection to find common indices.
+        map_indices = {
+            match.group(1)
+            for f in os.listdir(cmb_dir)
+            if (match := re.search(r'cmb_(\d+)\.fits', f))
+        }
+        param_indices = {
+            match.group(1)
+            for f in os.listdir(params_dir)
+            if (match := re.search(r'params_(\d+)\.npy', f))
+        }
+        
+        # The set of valid indices is the intersection of the two sets.
+        valid_indices = list(map_indices.intersection(param_indices))
+
+        if not valid_indices:
+            print("Warning: No matching cmb/param file pairs found in the directories.")
+            return None, None
+
+    except FileNotFoundError as e:
+        print(f"Error: A directory was not found: {e}")
+        return None, None
+    
+    # 2. Check if there are enough valid files to create a batch.
+    num_available = len(valid_indices)
+    if num_available < batch_size:
+        print(
+            f"Warning: Requested batch_size {batch_size}, but only {num_available} "
+            f"matching pairs are available. Returning a smaller batch of size {num_available}."
+        )
+        # Adjust the batch size to the number of available files.
+        current_batch_size = num_available
+    else:
+        current_batch_size = batch_size
+
+    # 3. Choose a random sample of `current_batch_size` indices WITHOUT replacement.
+    chosen_indices = random.sample(valid_indices, current_batch_size)
+
+    # 4. Load the files corresponding to the chosen indices.
+    maps_list = []
+    params_list = []
+    H0_list, ombh2_list = [], []
+
+    for index_str in chosen_indices:
+        map_filepath = os.path.join(cmb_dir, f"cmb_{index_str}.fits")
+        param_filepath = os.path.join(params_dir, f"params_{index_str}.npy")
+        try:
+            # We already confirmed files exist, so this primarily catches load/corruption errors.
+            cmb_map = enmap.read_map(map_filepath)
+            cmb_map = cv2.resize(cmb_map, sub_shape)
+            params = np.load(param_filepath, allow_pickle=True).item()
+            maps_list.append(cmb_map)
+
+            H0_list.append(params['H0'])
+            ombh2_list.append(params['ombh2'])
+            
+        except Exception as e:
+            # If a specific file is corrupt, skip it and print a warning.
+            print(f"Warning: Could not load pair for index '{index_str}'. Skipping. Error: {e}")
+            continue
+
+    # If all chosen files failed to load, return None.
+    if not maps_list:
+        print("Error: Failed to load any valid data for the selected batch.")
+        return None, None
+
+    # 5. Stack the individual arrays into a single batch.
+    # enmap.stack is preferred for maps as it correctly handles WCS information.
+    # np.stack is used for the parameter arrays.
+    batched_cmb_maps = np.stack(maps_list, axis=0)
+    batched_H0 = np.stack(H0_list, axis=0).reshape(-1, 1)
+    batched_ombh2 = np.stack(ombh2_list, axis=0).reshape(-1, 1)
+    batched_params = np.concatenate([batched_H0, batched_ombh2], axis=1)
+
+    return torch.tensor(batched_cmb_maps).unsqueeze(1).to(device), torch.tensor(batched_params).to(device)
 
 #### --------- DATASET-CREATION --------------
 
@@ -382,9 +489,28 @@ def generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE, verbose=False):
 if __name__ == '__main__':
 
     ## We test with few samples first (PASS-SUBSHAPE)
-    NUM_SAMPLES_TO_GENERATE = 1000
-    ft = time.time()
-    dust_maps, cmb_maps, mixed_maps, params_list = generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE)
-    lt = time.time()
-    print('time-taken (mixed-map-generation): ', (lt - ft)/60, ' mins')
-    print(dust_maps.shape, cmb_maps.shape, mixed_maps.shape, params_list.shape)
+    # NUM_SAMPLES_TO_GENERATE = 2
+    # ft = time.time()
+    # dust_maps, cmb_maps, mixed_maps, params_list = generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE)
+    # lt = time.time()
+    # print('time-taken (mixed-map-generation): ', (lt - ft)/60, ' mins')
+    # print(dust_maps.shape, cmb_maps.shape, mixed_maps.shape, params_list.shape)
+
+    print()
+    print(' ----- Testing-Secondary-Sampling-Performance (CMB) ----- ')
+    
+    cmb_source_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
+    params_source_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/params'
+    
+    cmb_map, params = load_random_sample_from_disk(cmb_source_path, params_source_path)
+
+    print('CMB-MAP: ' , cmb_map.shape)
+    print('Params:')
+    pprint(params)
+
+    ### Need to return batch-wise
+    cmb_map, params = load_random_sample_from_disk_batch(cmb_source_path, params_source_path, batch_size=32)
+
+    print('CMB-MAP (batch): ' , cmb_map.shape)
+    print('Params (batch):', params.shape)
+

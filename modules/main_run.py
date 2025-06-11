@@ -53,7 +53,7 @@ def get_hparams(mode = '1D'):
 
     if mode == '1D':
         params = {
-            'train_num_steps': 50000, # > 10
+            'train_num_steps': 50001, # > 10
             'seq_len': 100,
             'diffusion_steps': 1000, ## ancestral sampling steps
             'train_batch_size': 32,
@@ -69,10 +69,10 @@ def get_hparams(mode = '1D'):
         extract_dir = 'data/'
         train_image_path, _ = tiny_imagenet_file_handler(extract_dir)
         params = {
-        'train_num_steps': 30000,
+        'train_num_steps': 10001,
         'init_size': (64, 64),
         'diffusion_steps': 1000, ## ancestral sampling steps
-        'train_batch_size': 16,
+        'train_batch_size': 32,
         'infer_phi': 1.0,
         'infer_sigma': 0.2,
         'input_dim': 32,
@@ -85,14 +85,14 @@ def get_hparams(mode = '1D'):
     elif mode == 'cosmo': ## (PASS-SUBSHAPE)
         cosmo_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data'
         params = {
-        'train_num_steps': 100,
-        'init_size': (16, 16),
+        'train_num_steps': 10001,
+        'init_size': (64, 64),
         'diffusion_steps': 1000, ## ancestral sampling steps
         'train_batch_size': 32,
         'infer_H0': 72.0, ##
         'infer_sigma': 0.40,
         'infer_ombh2': 0.02,
-        'input_dim': 4,
+        'input_dim': 32,
         'learning_rate':1e-5,
         'cosmo_path': cosmo_path,
         'n_samples': 1000,
@@ -110,14 +110,14 @@ def get_hparams(mode = '1D'):
 def get_data(params, mode = '1D'):
 
     if mode == '1D':
-        observation, images, noise = create_1d_data_colored_multi(n_samples=params['n_samples'], phi=params['infer_phi'], sigma=params['infer_sigma'])
+        _, images, _ = create_1d_data_colored_multi(n_samples=params['n_samples'], phi=params['infer_phi'], sigma=params['infer_sigma'])
     
     elif mode == '2D':
-        observation, images, noise = create_2d_data_colored(params['image_paths'], n_samples=params['n_samples'], phi=params['infer_phi'], sigma=params['infer_sigma'], size=params['init_size'], is_plot=False)
+        _, images, _ = create_2d_data_colored(params['image_paths'], n_samples=params['n_samples'], phi=params['infer_phi'], sigma=params['infer_sigma'], size=params['init_size'], is_plot=False)
     
     elif mode == 'cosmo':
         ## observation = mixed-map, images = intersteller-dust, noise = CMB signal
-        observation, images, noise, _ = get_cosmo_data(n_samples=params['n_samples'], sub_shape=params['init_size']) 
+        _, images, _, _ = get_cosmo_data(n_samples=params['n_samples'], sub_shape=params['init_size']) 
    
     else:
         raise ValueError('Wrong Mode Selected')
@@ -127,13 +127,15 @@ def get_data(params, mode = '1D'):
 
     rand_idx = torch.randperm(subset_sample_len)
 
-    train_observation, val_observation = observation[rand_idx][:int(train_split * subset_sample_len)], observation[rand_idx][int(train_split * subset_sample_len):] 
+    # train_observation, val_observation = observation[rand_idx][:int(train_split * subset_sample_len)], observation[rand_idx][int(train_split * subset_sample_len):] 
     train_images, val_images = images[rand_idx][:int(train_split * subset_sample_len)], images[rand_idx][int(train_split * subset_sample_len):] 
-    train_noise, val_noise = noise[rand_idx][:int(train_split * subset_sample_len)], noise[rand_idx][int(train_split * subset_sample_len):] 
+    # train_noise, val_noise = noise[rand_idx][:int(train_split * subset_sample_len)], noise[rand_idx][int(train_split * subset_sample_len):] 
 
     print('Dataset-Retrieved')
 
-    return train_observation, val_observation, train_images, val_images, train_noise, val_noise
+    # return train_observation, val_observation, train_images, val_images, train_noise, val_noise
+    return train_images, val_images
+
 
 def plot_curve(train_loss_curve, val_loss_curve_x, val_loss_curve_y, mode):
     plot_dir = os.path.join(save_dir, 'plots')
@@ -326,10 +328,10 @@ def run_main(train_data, val_data, params, mode = '1D', is_plot=True):
         save_path = os.path.join(save_dir, 'gdiffusion_cosmo_model.pth')
 
         torch.save({
-        'model_state_dict': gdiffusion_2d.model.state_dict(),
+        'model_state_dict': gdiffusion_2d_cosmo.model.state_dict(),
         'config': {
-            'input_size': gdiffusion_2d.image_size,
-            'num_timesteps': gdiffusion_2d.num_timesteps,
+            'input_size': gdiffusion_2d_cosmo.image_size_hw,
+            'num_timesteps': gdiffusion_2d_cosmo.num_timesteps_ddpm,
             'params': params,  # optional: save full params dict
         }
         }, save_path)
@@ -357,7 +359,7 @@ if __name__ == '__main__':
 
     params = get_hparams(args_mode)
     
-    _, _, train_data, val_data, _, _ = get_data(params, mode=args_mode)
+    train_data, val_data = get_data(params, mode=args_mode)
     print(train_data.shape, val_data.shape)
 
     run_main(train_data, val_data, params, mode=args_mode)
