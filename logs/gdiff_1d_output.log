@@ -19,7 +19,7 @@ Loading python/3.9.12/gcc/pdcqf4o5
 running __run_main.py__ ...
 HyParams-Retrieved
 Dataset-Retrieved
-(40000, 100) (10000, 100)
+(80000, 100) (20000, 100)
 started-training 1D ...
 Dimension-Cluster:  32 64 128 256 512
 (2, 1, 100) (2,)
@@ -202,4 +202,4 @@ Non-trainable params: 0
 ____________________________________________________________________________________________________
 Validation-Stepper:  25
 Training complete.
-trained and saved (1D) in 0.0018748203913370768 mins
+trained and saved (1D) in 0.001601711908976237 mins

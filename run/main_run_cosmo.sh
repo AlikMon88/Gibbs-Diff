@@ -2,7 +2,7 @@
 #SBATCH --job-name=gdiff-cosmo
 #SBATCH --output=/home/am3353/Gibbs-Diff/logs/gdiff_cosmo_output.log
 #SBATCH --error=/home/am3353/Gibbs-Diff/logs/gdiff_cosmo_error.log
-#SBATCH --time=20:00:00
+#SBATCH --time=23:00:00
 #SBATCH --partition=ampere
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
