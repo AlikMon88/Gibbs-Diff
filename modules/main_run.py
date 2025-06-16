@@ -69,7 +69,7 @@ def get_hparams(mode = '1D'):
         extract_dir = 'data/'
         train_image_path, _ = tiny_imagenet_file_handler(extract_dir)
         params = {
-        'train_num_steps': 30001,
+        'train_num_steps': 13001,
         'init_size': (64, 64),
         'diffusion_steps': 1000, ## ancestral sampling steps
         'train_batch_size': 32,
