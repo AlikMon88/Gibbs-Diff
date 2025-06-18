@@ -488,29 +488,29 @@ def generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE, verbose=False):
 
 if __name__ == '__main__':
 
-    ## We test with few samples first (PASS-SUBSHAPE)
-    # NUM_SAMPLES_TO_GENERATE = 2
-    # ft = time.time()
-    # dust_maps, cmb_maps, mixed_maps, params_list = generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE)
-    # lt = time.time()
-    # print('time-taken (mixed-map-generation): ', (lt - ft)/60, ' mins')
-    # print(dust_maps.shape, cmb_maps.shape, mixed_maps.shape, params_list.shape)
+    # We test with few samples first (PASS-SUBSHAPE)
+    NUM_SAMPLES_TO_GENERATE = 3000
+    ft = time.time()
+    dust_maps, cmb_maps, mixed_maps, params_list = generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE)
+    lt = time.time()
+    print('time-taken (mixed-map-generation): ', (lt - ft)/60, ' mins')
+    print(dust_maps.shape, cmb_maps.shape, mixed_maps.shape, params_list.shape)
 
-    print()
-    print(' ----- Testing-Secondary-Sampling-Performance (CMB) ----- ')
+    # print()
+    # print(' ----- Testing-Secondary-Sampling-Performance (CMB) ----- ')
     
-    cmb_source_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
-    params_source_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/params'
+    # cmb_source_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
+    # params_source_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/params'
     
-    cmb_map, params = load_random_sample_from_disk(cmb_source_path, params_source_path)
+    # cmb_map, params = load_random_sample_from_disk(cmb_source_path, params_source_path)
 
-    print('CMB-MAP: ' , cmb_map.shape)
-    print('Params:')
-    pprint(params)
+    # print('CMB-MAP: ' , cmb_map.shape)
+    # print('Params:')
+    # pprint(params)
 
-    ### Need to return batch-wise
-    cmb_map, params = load_random_sample_from_disk_batch(cmb_source_path, params_source_path, batch_size=32)
+    # ### Need to return batch-wise
+    # cmb_map, params = load_random_sample_from_disk_batch(cmb_source_path, params_source_path, batch_size=32)
 
-    print('CMB-MAP (batch): ' , cmb_map.shape)
-    print('Params (batch):', params.shape)
+    # print('CMB-MAP (batch): ' , cmb_map.shape)
+    # print('Params (batch):', params.shape)
 

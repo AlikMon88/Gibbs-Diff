@@ -166,10 +166,10 @@ def create_1d_data_colored_multi(n_samples=1000, n_depth=100, phi=1.0, decay=0.1
         raise ValueError(f"Incompatible sigma shape: got {sigma.shape}, expected scalar, (n_samples,), or (n_samples, n_depth)")
 
     # Diffusion-style mixing
-    # sqrt_one_minus_sigma2 = torch.sqrt(1.0 - sigma ** 2)
-    # observation = sqrt_one_minus_sigma2 * signal + sigma * noise
+    sqrt_one_minus_sigma2 = torch.sqrt(1.0 - sigma ** 2)
+    observation = sqrt_one_minus_sigma2 * signal + sigma * noise
 
-    observation = signal + noise
+    # observation = signal + noise
 
     return observation.cpu().numpy(), signal.cpu().numpy(), noise.cpu().numpy()
 

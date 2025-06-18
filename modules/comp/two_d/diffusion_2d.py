@@ -63,6 +63,10 @@ class GibbsDiff2D(nn.Module):
         *,
         image_size,
         num_timesteps=1000,
+        hmc_chain_length = 10,
+        hmc_n_leapfrog_steps = 5,
+        hmc_burnin_steps = 4,
+        hmc_adapt_stepsize_iters = 5,
         sampling_timesteps=None):
 
         super().__init__()
@@ -72,7 +76,13 @@ class GibbsDiff2D(nn.Module):
         self.num_timesteps = num_timesteps
         self.image_size = image_size  # (H, W)
         self.channels = 3
-
+        
+        # HMC parameters (can be tuned)
+        self.hmc_n_leapfrog_steps = hmc_n_leapfrog_steps
+        self.hmc_chain_length = hmc_chain_length
+        self.hmc_burnin_steps = hmc_burnin_steps # Burn-in for HMC adaptation *within* a Gibbs iter
+        self.hmc_adapt_stepsize_iters = hmc_adapt_stepsize_iters # for the very first HMC call
+ 
         self.beta_small = 0.1 / self.num_timesteps
         self.beta_large = 20 / self.num_timesteps
         self.timesteps_t = torch.arange(0, self.num_timesteps)
@@ -172,12 +182,12 @@ class GibbsDiff2D(nn.Module):
 
         ## HMC-Sampler
         if sampler_v2:
-            hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc_v2(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, \
-            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.n_adapt, phi_min_norm=None, phi_max_norm=None) 
+            hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc_v2(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.hmc_n_leapfrog_steps, chain_length=self.hmc_chain_length, burnin_steps=self.hmc_burnin_steps, \
+            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.hmc_adapt_stepsize_iters, phi_min_norm=None, phi_max_norm=None) 
 
         else:
-            hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, \
-            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.n_adapt, phi_min_norm=None, phi_max_norm=None)
+            hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.hmc_n_leapfrog_steps, chain_length=self.hmc_chain_length, burnin_steps=self.hmc_burnin_steps, \
+            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.hmc_adapt_stepsize_iters, phi_min_norm=None, phi_max_norm=None)
 
         hmc_accept_list = []
 

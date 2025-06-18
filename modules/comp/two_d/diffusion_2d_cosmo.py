@@ -66,9 +66,10 @@ class GibbsDiff2D_cosmo(nn.Module):
         num_timesteps_ddpm=1000, # Timesteps for the DDPM noise schedule
         sampling_timesteps_ddpm=None, # For DDIM-like acceleration if used
         ddpm_beta_schedule='linear', # 'linear' or 'cosine'
+        
         # HMC specific parameters for Phi_CMB sampling
         hmc_n_leapfrog_steps=5,
-        hmc_chain_length=1, # Number of HMC samples per Gibbs iteration
+        hmc_chain_length=5, # Number of HMC samples per Gibbs iteration
         hmc_burnin_steps=2, # Burn-in for HMC *within* each Gibbs step (usually small or 0 after initial adaptation)
         hmc_adapt_stepsize_iters = 5 # For initial HMC step size adaptation
     ):
@@ -240,7 +241,7 @@ class GibbsDiff2D_cosmo(nn.Module):
 
     @torch.no_grad()
     def sample_dust_posterior(self, y_observed_cmb_corrupted, # The actual observation [B_orig,C,H,W]
-                              phi_cmb_current_estimate,     # Current Phi_CMB [B_chains, 3]
+                              phi_cmb_current_estimate,     # Current Phi_CMB [B_chains, 3] | (sigma, H0, ombh2)
                               num_ddpm_ancestral_steps=None): # How many DDPM steps from t_eff
         """
         Samples a dust map x_k ~ q(x | y_observed, Phi_CMB_current)

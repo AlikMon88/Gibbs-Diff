@@ -69,14 +69,14 @@ def get_hparams(mode = '1D'):
         extract_dir = 'data/'
         train_image_path, _ = tiny_imagenet_file_handler(extract_dir)
         params = {
-        'train_num_steps': 13001,
-        'init_size': (64, 64),
-        'diffusion_steps': 1000, ## ancestral sampling steps
+        'train_num_steps': 30001,
+        'init_size': (24, 24),
+        'diffusion_steps': 1500, ## ancestral sampling steps
         'train_batch_size': 32,
         'infer_phi': 1.0,
         'infer_sigma': 0.2,
-        'input_dim': 48,
-        'learning_rate':1e-5,
+        'input_dim': 36,
+        'learning_rate':1e-4,
         'image_paths': train_image_path,
         'n_samples': 100000,
         'train_split': 0.8
@@ -85,17 +85,17 @@ def get_hparams(mode = '1D'):
     elif mode == 'cosmo': ## (PASS-SUBSHAPE)
         cosmo_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data'
         params = {
-        'train_num_steps': 30001,
+        'train_num_steps': 10001,
         'init_size': (64, 64),
-        'diffusion_steps': 1000, ## ancestral sampling steps
+        'diffusion_steps': 1600, ## ancestral sampling steps
         'train_batch_size': 32,
         'infer_H0': 72.0, ##
         'infer_sigma': 0.40,
         'infer_ombh2': 0.02,
-        'input_dim': 48,
+        'input_dim': 64, #64
         'learning_rate':1e-5,
         'cosmo_path': cosmo_path,
-        'n_samples': 1000,
+        'n_samples': 3000,
         'train_split': 0.8
     }
     
@@ -144,22 +144,45 @@ def plot_curve(train_loss_curve, val_loss_curve_x, val_loss_curve_y, mode):
 
     plot_save_path = os.path.join(plot_dir, f'plots_curve_{mode}.png')
 
-    fig = plt.Figure(figsize=(7, 7))
-
+    fig, axs = plt.subplots(1, 3, figsize=(20, 8))
+    
+    
     if (len(train_loss_curve) < 10) or (len(val_loss_curve_y) < 10):
         rate = 1
     else:
         rate = 10
 
-    plt.plot(np.arange(len(train_loss_curve))[::rate], train_loss_curve[::rate], color = 'red', label = 'train')
-    plt.plot(val_loss_curve_x[::rate], val_loss_curve_y[::rate], color = 'blue', label = 'validation')
+    train_x_epoch = np.arange(len(train_loss_curve))[::rate] 
+    val_x_epoch = val_loss_curve_x[::rate]
+    
+    ## Last 10%/15% optimizatio-steps
+    train_loc_last_steps = int(0.10 * len(train_x_epoch)) 
+    val_loc_last_steps = int(0.15 * len(val_x_epoch))
+    
+    axs[0].plot(train_x_epoch, train_loss_curve[::rate], color = 'red', label = 'train')
+    axs[0].plot(val_x_epoch, val_loss_curve_y[::rate], color = 'blue', label = 'validation')
 
-    plt.ylabel('Loss')
-    plt.xlabel('#Optimization Steps (sub-sampled)')
-    plt.title('Loss-Curve (Sub-Sampled)')
-
-    plt.grid()
-    plt.legend()
+    axs[0].set_ylabel('Loss')
+    axs[0].set_xlabel('#Optimization Steps')
+    axs[0].set_title('Loss-Curve (Sub-Sampled)')
+    axs[0].grid()
+    axs[0].legend()
+    
+    axs[1].plot(train_x_epoch[-train_loc_last_steps:], train_loss_curve[::rate][-train_loc_last_steps:], color = 'red', label = 'train')
+    axs[1].set_ylabel('Loss')
+    axs[1].set_xlabel('#Optimization Steps')
+    axs[1].set_title(f'Loss-Curve-Train (last {train_loc_last_steps} steps)', fontsize=12)
+    axs[1].grid()
+    axs[1].legend()
+    
+    axs[2].plot(val_x_epoch[-val_loc_last_steps:], val_loss_curve_y[::rate][-val_loc_last_steps:], color = 'blue', label = 'validation')
+    axs[2].set_ylabel('Loss')
+    axs[2].set_xlabel('#Optimization Steps')
+    axs[2].set_title(f'Loss-Curve-Val (last {val_loc_last_steps} steps)', fontsize=12)
+    axs[2].grid()
+    axs[2].legend()
+    
+    plt.tight_layout(pad=2)
     plt.savefig(plot_save_path)
 
 def run_main(train_data, val_data, params, mode = '1D', is_plot=True):
@@ -202,9 +225,9 @@ def run_main(train_data, val_data, params, mode = '1D', is_plot=True):
             ema_decay = 0.995,                 # exponential moving average decay
             mode = mode
         )
-        lt = time.time()
 
         train_loss_curve, val_loss_curve_x, val_loss_curve_y = gtrainer.train()
+        lt = time.time()
         
         if is_plot:
             plot_curve(train_loss_curve, val_loss_curve_x, val_loss_curve_y, mode=mode)
@@ -260,9 +283,9 @@ def run_main(train_data, val_data, params, mode = '1D', is_plot=True):
             ema_decay = 0.995,                 # exponential moving average decay
             mode = mode
         )
-        lt = time.time()
 
         train_loss_curve, val_loss_curve_x, val_loss_curve_y = gtrainer_2d.train()
+        lt = time.time()
         
         if is_plot:
             plot_curve(train_loss_curve, val_loss_curve_x, val_loss_curve_y, mode=mode)
@@ -317,9 +340,9 @@ def run_main(train_data, val_data, params, mode = '1D', is_plot=True):
             ema_decay = 0.995,                 # exponential moving average decay
             mode = mode
         )
-        lt = time.time()
 
         train_loss_curve, val_loss_curve_x, val_loss_curve_y = gtrainer_2d_cosmo.train()
+        lt = time.time()
         
         if is_plot:
             plot_curve(train_loss_curve, val_loss_curve_x, val_loss_curve_y, mode=mode)
