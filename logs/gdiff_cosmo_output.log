@@ -22,11 +22,11 @@ Found directories: ['dust_maps', 'params', 'cmb_maps', 'mixed_maps']
 Warning: Could not load or process parameter file. Error: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte
 
 --- Final Shapes ---
-CMB shape: (1000, 64, 64)
-Dust shape: (1000, 64, 64)
-Mixed shape: (1000, 64, 64)
+CMB shape: (3000, 64, 64)
+Dust shape: (3000, 64, 64)
+Mixed shape: (3000, 64, 64)
 Dataset-Retrieved
-(800, 1, 64, 64) (200, 1, 64, 64)
+(2400, 1, 64, 64) (600, 1, 64, 64)
 started-training cosmo ...
 (2, 1, 64, 64) (2,)
 - UNET-summary -
@@ -225,4 +225,5 @@ Trainable params: 49,534,273
 Non-trainable params: 0
 ____________________________________________________________________________________________________
 Validation-Stepper:  25
-Warning: Could not load pair for index '0461'. Skipping. Error: [Errno 2] No such file or directory: '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps/cmb_0461.fits'
+Training complete.
+trained and saved (cosmo) in 444.2291937589645 mins

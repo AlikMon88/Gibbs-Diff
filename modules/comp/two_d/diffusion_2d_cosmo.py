@@ -27,6 +27,9 @@ from ...utils.hmc_cosmo import *
 from pixell import enmap
 from ...utils.cosmo_create import get_cmb_noise_batch, load_random_sample_from_disk_batch
 
+import matplotlib.pyplot as plt
+import cv2
+
 CMB_SOURCE_PATH = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
 PARAMS_SOURCE_PATH = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/params'
     
@@ -138,6 +141,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
         phi_cmb_batch = phi_cmb_batch.float()
         
+        
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
@@ -155,7 +159,9 @@ class GibbsDiff2D_cosmo(nn.Module):
         
         ddpm_noise_eps = (CMB_maps - CMB_maps.mean(dim=(2, 3), keepdim=True)) / CMB_maps.std(dim=(2, 3), keepdim=True)  ## standardize ranges
         ddpm_noise_eps = ddpm_noise_eps.float()
-
+        
+        # plt.imshow(ddpm_noise_eps[0].cpu().numpy().reshape(64, 64, 1), cmap='coolwarm')
+        # plt.savefig('ddpm_noise_eps.png')
 
         # 3. Create z_t (DDPM noised dust map)
         # x_t = sqrt(alpha_hat) * x_0 + sqrt(1-alpha_hat) * eps
@@ -209,12 +215,51 @@ class GibbsDiff2D_cosmo(nn.Module):
         # closest_timestep = torch.argmin(torch.abs(all_noise_levels - sigma_cmb_values), dim=0)
 
         # return closest_timestep    
-        
-
+    
+    
+    ## Problem in DDPM Sampling (Either Lookup/Dynimically create conditioned noise)
     @torch.no_grad()
-    def denoise_1step_ancestral(self, z_t, t_ddpm, phi_cmb_cond): # t_ddpm is a scalar tensor
+    def denoise_1step_ancestral(self, z_t, t_ddpm, phi_cmb_cond, is_phys=False, phys_idx=None): # t_ddpm is a scalar tensor
         """ Performs one step of DDPM ancestral sampling. """
         # Ensure t_ddpm is correctly shaped for model and indexing
+        
+        if phi_cmb_cond is None:
+            phi_cmb_cond = torch.zeros(z_t.shape[0], 2, device=self.device).float()
+
+        if isinstance(phi_cmb_cond, int) or isinstance(phi_cmb_cond, float):
+            phi_cmb_cond = phi_cmb_cond * torch.ones(z_t.shape[0], 2, device=self.device).float()
+        else:
+            phi_cmb_cond = phi_cmb_cond.to(self.device).float()
+
+        if t_ddpm > 1:
+            if is_phys:
+                ## secondary_mem sampling (based on supplied physical_index)
+                # CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
+                phys_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
+                phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
+                z = enmap.read_map(phys_path)
+                z = cv2.resize(np.array(z), self.image_size_hw)
+                z = (z - np.mean(z)) / np.std(z)
+                z = z.reshape(*z_t.shape)
+                
+                # z, _ = get_colored_noise_2d(z_t.shape, phi_cmb_cond, device=self.device)
+            else:
+                ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
+                pass
+        else:
+            z = 0
+
+        t_ch = t_ddpm.view(1).repeat(z_t.shape[0],).float()
+        e_hat = self.model(z_t.float(), t_ch, phi_cmb=phi_cmb_cond)
+        pre_scale = 1 / math.sqrt(self.alpha_t_ddpm[t_ddpm])
+        e_scale = self.beta_t_ddpm[t_ddpm] / math.sqrt(1 - self.alpha_bar_t_ddpm[t_ddpm])
+        post_sigma = math.sqrt(self.beta_t_ddpm[t_ddpm]) * z
+        z_t = pre_scale * (z_t - e_scale * e_hat) + post_sigma
+        
+        return z_t
+        
+        # --------------------------------------------
+        
         t_ddpm_batch = t_ddpm.repeat(z_t.shape[0]) # If z_t is batched
 
         predicted_ddpm_noise = self.model(z_t.float(), t_ddpm_batch.float(), phi_cmb=phi_cmb_cond)
@@ -222,11 +267,6 @@ class GibbsDiff2D_cosmo(nn.Module):
         alpha_t = self.alpha_t_ddpm[t_ddpm]
         alpha_bar_t = self.alpha_bar_t_ddpm[t_ddpm]
         
-        # Denoise from z_t to predicted x_0
-        # x_0_pred = (z_t - torch.sqrt(1. - alpha_bar_t) * predicted_ddpm_noise) / torch.sqrt(alpha_bar_t)
-        # x_0_pred = torch.clamp(x_0_pred, -1., 1.) # Optional clamping if data was in [-1,1]
-
-        # Standard DDPM sampling step (from Ho et al. 2020, Eq. 11 for x_t-1 from x_t)
         # x_{t-1} = 1/sqrt(alpha_t) * (x_t - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_theta) + sigma_t * z
         coeff1 = 1.0 / torch.sqrt(alpha_t)
         coeff2 = (1.0 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)
@@ -234,7 +274,20 @@ class GibbsDiff2D_cosmo(nn.Module):
         
         variance_t = self.beta_t_ddpm[t_ddpm] # sigma_t^2 = beta_t
         
-        noise_for_prev_step = torch.randn_like(z_t) if t_ddpm > 0 else torch.zeros_like(z_t)
+        if is_phys:
+            ## secondary_mem sampling (based on supplied physical_index)
+            # CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
+            phys_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
+            phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
+            noise_for_prev_step = enmap.read_map(phys_path)
+            noise_for_prev_step = cv2.resize(np.array(noise_for_prev_step), self.image_size_hw)
+            noise_for_prev_step = noise_for_prev_step.reshape(*z_t.shape)
+            # print(noise_for_prev_step.shape)
+        else:
+            ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
+            pass
+            
+        # noise_for_prev_step = torch.randn_like(z_t) if t_ddpm > 0 else torch.zeros_like(z_t)
         z_prev_t = mean_prev_t + torch.sqrt(variance_t) * noise_for_prev_step
         
         return z_prev_t
@@ -242,7 +295,11 @@ class GibbsDiff2D_cosmo(nn.Module):
     @torch.no_grad()
     def sample_dust_posterior(self, y_observed_cmb_corrupted, # The actual observation [B_orig,C,H,W]
                               phi_cmb_current_estimate,     # Current Phi_CMB [B_chains, 3] | (sigma, H0, ombh2)
-                              num_ddpm_ancestral_steps=None): # How many DDPM steps from t_eff
+                              num_ddpm_ancestral_steps=None,
+                              is_phys=False,
+                              phys_idx=None, 
+                              batch_origin=None, 
+                              return_sample=False): 
         """
         Samples a dust map x_k ~ q(x | y_observed, Phi_CMB_current)
         using DDPM ancestral sampling, starting from an effective t_eff.
@@ -253,32 +310,34 @@ class GibbsDiff2D_cosmo(nn.Module):
         # considered to be at some t_eff.
         
         sigma_cmb_from_phi = phi_cmb_current_estimate[:, 0] # Extract current sigma_CMB estimate
+        phi_ps = phi_cmb_current_estimate[:, 1:]
+        
+        print(sigma_cmb_from_phi.shape, phi_ps.shape)
 
         # Find the DDPM timestep t_eff that "matches" the current sigma_CMB
-        t_eff_indices = self.get_closest_ddpm_timestep_from_sigma_cmb(sigma_cmb_from_phi) # [B_chains]
+        timesteps = self.get_closest_ddpm_timestep_from_sigma_cmb(sigma_cmb_from_phi) # [B_chains]
         
-        # The starting "noisy image" for DDPM is the observation y.
-        # If y_observed_cmb_corrupted is [B_orig, C, H, W] and phi_cmb_current_estimate is [B_chains, 3],
-        # and B_chains = B_orig * num_chains_per_sample, we need to align them.
-        # Typically, y_observed will already be repeated for each chain.
-        z_t_eff = y_observed_cmb_corrupted.clone() # Shape [B_chains, C, H, W]
+        noisy_batch = y_observed_cmb_corrupted.clone() # Shape [B_chains, C, H, W]
+        
+        max_timesteps = torch.max(timesteps)
+        mask = torch.ones(noisy_batch.shape[0], max_timesteps + 1).to(self.device)
 
-        # Determine the number of DDPM steps for each chain
-        # This can be fixed (e.g., all run for max(t_eff_indices) steps)
-        # or variable (each chain runs for its own t_eff_i steps).
-        # For simplicity, let's make all chains run up to max(t_eff_indices)
-        # and apply updates conditionally.
-        # Or, more simply for ancestral sampling: each chain starts at its t_eff_i
-        # and iterates down to 0. The number of steps will vary.
-        
-        # The paper's code (natural images) uses "mask" to handle variable timesteps in batch.
-        # Let's iterate for each chain individually for clarity here, then batch it.
-        # This is inefficient but illustrates the per-chain logic.
-        # A batched version would run all chains for max(t_eff_indices) steps
-        # and use a mask to apply updates only for t <= t_eff_i for chain i.
-        
-        # Simpler: Loop for the maximum t_eff found across the batch.
-        # Inside the loop, only update samples whose t_eff_i is >= current t.
+        for i in range(noisy_batch.shape[0]):
+            mask[i, timesteps[i]+1:] = 0
+
+        for t in range(max_timesteps, 0, -1):
+            noisy_batch = self.denoise_1step_ancestral(noisy_batch, torch.tensor(t), phi_ps, is_phys=is_phys, phys_idx=phys_idx) * (mask[:, t]).reshape(-1, 1, 1, 1) + \
+                          noisy_batch * (1 - mask[:, t]).reshape(-1, 1, 1, 1)
+
+        if batch_origin is None:
+            return noisy_batch
+        else:
+            if return_sample:
+                return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), noisy_batch
+            else:
+                return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), None
+
+        ## ------------------------------------------------------------
         
         max_t_eff = torch.max(t_eff_indices).item()
         current_z = z_t_eff
@@ -290,7 +349,7 @@ class GibbsDiff2D_cosmo(nn.Module):
             active_mask = (t_eff_indices >= t_val_ddpm).float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
             
             if torch.sum(active_mask) > 0: # If any chain is active
-                z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate[:, :2])
+                z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate[:, 1:], is_phys=is_phys, phys_idx=phys_idx)
                 current_z = active_mask * z_prev_t + (1.0 - active_mask) * current_z # Update only active chains
             
         return current_z # This is the sampled x_k (dust map)

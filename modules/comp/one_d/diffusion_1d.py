@@ -80,10 +80,10 @@ class GibbsDiff1D(nn.Module):
         self.alpha_t = 1 - self.beta_t
         self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0) 
 
-        self.n_leapfrog_steps = 2  
-        self.chain_length =  5
-        self.burnin_steps = 2
-        self.n_adapt = 5
+        self.n_leapfrog_steps = 70  
+        self.chain_length =  80
+        self.burnin_steps = 20
+        self.n_adapt = 35
 
         if not sampling_timesteps:
             self.sampling_timesteps = self.num_timesteps
