@@ -141,7 +141,6 @@ class GibbsDiff2D_cosmo(nn.Module):
         CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
         phi_cmb_batch = phi_cmb_batch.float()
         
-        
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
@@ -150,9 +149,11 @@ class GibbsDiff2D_cosmo(nn.Module):
         # ddpm_noise_eps = torch.randn_like(clean_dust_batch, device=self.device)
 
         ''' 
-        ADD CMB gaussian like distribution (noise) dynamically [REALLY-SLOW]
+        ADD CMB gaussian like distribution (noise) dynamically [REALLY-SLOW] 
         I can uniformly sample from secondary memory created_data/cmb_maps + params 
-        ''' # Shape: (B, C, H, W) | do I standardize it?
+        ''' 
+        
+        # Shape: (B, C, H, W) | do I standardize it?
         
         # cmb_noise_prefill = lambda phi_cmb: get_cmb_noise_batch(phi_cmb_batch=phi_cmb, sub_shape=self.image_size_hw, device=self.device)
         # CMB_maps = cmb_noise_prefill(phi_cmb_batch)
@@ -198,23 +199,23 @@ class GibbsDiff2D_cosmo(nn.Module):
 
         # print('sigma_cmb_values: ', sigma_cmb_values.shape)
 
-        # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
-        ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
+        # # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
+        # ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
         
-        # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
-        diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
-        closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
+        # # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
+        # diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
+        # closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
 
-        return closest_ddpm_t_indices # These are the t_eff to start DDPM from
+        # return closest_ddpm_t_indices # These are the t_eff to start DDPM from
         
         ###################################
 
-        # alpha_bar_t_ddpm = self.alpha_bar_t_ddpm.to(self.device)
-        # all_noise_levels = torch.sqrt((1-alpha_bar_t_ddpm)/alpha_bar_t_ddpm).reshape(-1, 1).repeat(1, sigma_cmb_values.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
-        # print('Closest-Timestep: ', all_noise_levels.shape, sigma_cmb_values.shape)
-        # closest_timestep = torch.argmin(torch.abs(all_noise_levels - sigma_cmb_values), dim=0)
+        alpha_bar_t_ddpm = self.alpha_bar_t_ddpm.to(self.device)
+        all_noise_levels = torch.sqrt((1-alpha_bar_t_ddpm)/alpha_bar_t_ddpm).reshape(-1, 1).repeat(1, sigma_cmb_values.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
+        print('Closest-Timestep: ', all_noise_levels.shape, sigma_cmb_values.shape)
+        closest_timestep = torch.argmin(torch.abs(all_noise_levels - sigma_cmb_values), dim=0)
 
-        # return closest_timestep    
+        return closest_timestep    
     
     
     ## Problem in DDPM Sampling (Either Lookup/Dynimically create conditioned noise)
@@ -260,37 +261,37 @@ class GibbsDiff2D_cosmo(nn.Module):
         
         # --------------------------------------------
         
-        t_ddpm_batch = t_ddpm.repeat(z_t.shape[0]) # If z_t is batched
+        # t_ddpm_batch = t_ddpm.repeat(z_t.shape[0]) # If z_t is batched
 
-        predicted_ddpm_noise = self.model(z_t.float(), t_ddpm_batch.float(), phi_cmb=phi_cmb_cond)
+        # predicted_ddpm_noise = self.model(z_t.float(), t_ddpm_batch.float(), phi_cmb=phi_cmb_cond)
         
-        alpha_t = self.alpha_t_ddpm[t_ddpm]
-        alpha_bar_t = self.alpha_bar_t_ddpm[t_ddpm]
+        # alpha_t = self.alpha_t_ddpm[t_ddpm]
+        # alpha_bar_t = self.alpha_bar_t_ddpm[t_ddpm]
         
-        # x_{t-1} = 1/sqrt(alpha_t) * (x_t - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_theta) + sigma_t * z
-        coeff1 = 1.0 / torch.sqrt(alpha_t)
-        coeff2 = (1.0 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)
-        mean_prev_t = coeff1 * (z_t - coeff2 * predicted_ddpm_noise)
+        # # x_{t-1} = 1/sqrt(alpha_t) * (x_t - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_theta) + sigma_t * z
+        # coeff1 = 1.0 / torch.sqrt(alpha_t)
+        # coeff2 = (1.0 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)
+        # mean_prev_t = coeff1 * (z_t - coeff2 * predicted_ddpm_noise)
         
-        variance_t = self.beta_t_ddpm[t_ddpm] # sigma_t^2 = beta_t
+        # variance_t = self.beta_t_ddpm[t_ddpm] # sigma_t^2 = beta_t
         
-        if is_phys:
-            ## secondary_mem sampling (based on supplied physical_index)
-            # CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
-            phys_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
-            phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
-            noise_for_prev_step = enmap.read_map(phys_path)
-            noise_for_prev_step = cv2.resize(np.array(noise_for_prev_step), self.image_size_hw)
-            noise_for_prev_step = noise_for_prev_step.reshape(*z_t.shape)
-            # print(noise_for_prev_step.shape)
-        else:
-            ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
-            pass
+        # if is_phys:
+        #     ## secondary_mem sampling (based on supplied physical_index)
+        #     # CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
+        #     phys_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
+        #     phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
+        #     noise_for_prev_step = enmap.read_map(phys_path)
+        #     noise_for_prev_step = cv2.resize(np.array(noise_for_prev_step), self.image_size_hw)
+        #     noise_for_prev_step = noise_for_prev_step.reshape(*z_t.shape)
+        #     # print(noise_for_prev_step.shape)
+        # else:
+        #     ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
+        #     pass
             
-        # noise_for_prev_step = torch.randn_like(z_t) if t_ddpm > 0 else torch.zeros_like(z_t)
-        z_prev_t = mean_prev_t + torch.sqrt(variance_t) * noise_for_prev_step
+        # # noise_for_prev_step = torch.randn_like(z_t) if t_ddpm > 0 else torch.zeros_like(z_t)
+        # z_prev_t = mean_prev_t + torch.sqrt(variance_t) * noise_for_prev_step
         
-        return z_prev_t
+        # return z_prev_t
 
     @torch.no_grad()
     def sample_dust_posterior(self, y_observed_cmb_corrupted, # The actual observation [B_orig,C,H,W]
@@ -313,6 +314,11 @@ class GibbsDiff2D_cosmo(nn.Module):
         phi_ps = phi_cmb_current_estimate[:, 1:]
         
         print(sigma_cmb_from_phi.shape, phi_ps.shape)
+        
+        print('sigma: ', sigma_cmb_from_phi)
+        print('phi: ', phi_ps)
+        print('H0: ', phi_ps[: 0])
+        print('ombh2: ', phi_ps[: -1])
 
         # Find the DDPM timestep t_eff that "matches" the current sigma_CMB
         timesteps = self.get_closest_ddpm_timestep_from_sigma_cmb(sigma_cmb_from_phi) # [B_chains]
@@ -339,20 +345,20 @@ class GibbsDiff2D_cosmo(nn.Module):
 
         ## ------------------------------------------------------------
         
-        max_t_eff = torch.max(t_eff_indices).item()
-        current_z = z_t_eff
+        # max_t_eff = torch.max(t_eff_indices).item()
+        # current_z = z_t_eff
 
-        for t_val_ddpm in range(max_t_eff, -1, -1): # from max_t_eff down to 0
-            t_tensor = torch.tensor(t_val_ddpm, device=self.device)
+        # for t_val_ddpm in range(max_t_eff, -1, -1): # from max_t_eff down to 0
+        #     t_tensor = torch.tensor(t_val_ddpm, device=self.device)
             
-            # Create a mask for which chains are still active at this t_val_ddpm
-            active_mask = (t_eff_indices >= t_val_ddpm).float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        #     # Create a mask for which chains are still active at this t_val_ddpm
+        #     active_mask = (t_eff_indices >= t_val_ddpm).float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
             
-            if torch.sum(active_mask) > 0: # If any chain is active
-                z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate[:, 1:], is_phys=is_phys, phys_idx=phys_idx)
-                current_z = active_mask * z_prev_t + (1.0 - active_mask) * current_z # Update only active chains
+        #     if torch.sum(active_mask) > 0: # If any chain is active
+        #         z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate[:, 1:], is_phys=is_phys, phys_idx=phys_idx)
+        #         current_z = active_mask * z_prev_t + (1.0 - active_mask) * current_z # Update only active chains
             
-        return current_z # This is the sampled x_k (dust map)
+        # return current_z # This is the sampled x_k (dust map)
 
     def run_gibbs_sampler(self,
                             y_observed, # Single observation or batch [B_orig, C, H, W]
