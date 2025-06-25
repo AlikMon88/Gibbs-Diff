@@ -142,7 +142,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
         phi_cmb_batch = phi_cmb_batch.float()
         
-        print('phi_cmb_batch: ', torch.min(phi_cmb_batch.reshape(1, -1)[0]), torch.max(phi_cmb_batch.reshape(1, -1)[0]))
+        # print('phi_cmb_batch: ', torch.min(phi_cmb_batch.reshape(1, -1)[0]), torch.max(phi_cmb_batch.reshape(1, -1)[0]))
         
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
@@ -163,7 +163,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         
         ddpm_noise_eps = (CMB_maps - CMB_maps.mean(dim=(2, 3), keepdim=True)) / CMB_maps.std(dim=(2, 3), keepdim=True)  ## standardize ranges
         ddpm_noise_eps = ddpm_noise_eps.float()
-        print('ddpm_noise_eps: ', torch.min(ddpm_noise_eps.reshape(1, -1)[0]), torch.max(ddpm_noise_eps.reshape(1, -1)[0]))
+        # print('ddpm_noise_eps: ', torch.min(ddpm_noise_eps.reshape(1, -1)[0]), torch.max(ddpm_noise_eps.reshape(1, -1)[0]))
         
         # plt.imshow(ddpm_noise_eps[0].cpu().numpy().reshape(64, 64, 1), cmap='coolwarm')
         # plt.savefig('ddpm_noise_eps.png')
@@ -175,7 +175,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         # 4. Get model prediction (predicts the DDPM noise eps)
         # The model is conditioned on ddpm_timesteps and the true phi_cmb_batch
         predicted_ddpm_noise = self.model(z_t.float(), ddpm_timesteps.float(), phi_cmb=phi_cmb_batch)
-        print('predicted_ddpm_noise: ', torch.min(predicted_ddpm_noise.reshape(1, -1)[0]), torch.max(predicted_ddpm_noise.reshape(1, -1)[0]))
+        # print('predicted_ddpm_noise: ', torch.min(predicted_ddpm_noise.reshape(1, -1)[0]), torch.max(predicted_ddpm_noise.reshape(1, -1)[0]))
         
         # 5. Calculate MSE loss
         loss = nn.functional.mse_loss(predicted_ddpm_noise, ddpm_noise_eps)
@@ -325,12 +325,12 @@ class GibbsDiff2D_cosmo(nn.Module):
         sigma_cmb_from_phi = phi_cmb_current_estimate[:, 0] # Extract current sigma_CMB estimate
         phi_ps = phi_cmb_current_estimate[:, 1:]
         
-        print(sigma_cmb_from_phi.shape, phi_ps.shape)
+        # print(sigma_cmb_from_phi.shape, phi_ps.shape)
         
-        print('sigma: ', sigma_cmb_from_phi)
-        print('phi: ', phi_ps)
-        print('H0: ', phi_ps[: 0])
-        print('ombh2: ', phi_ps[: -1])
+        # print('sigma: ', sigma_cmb_from_phi)
+        # print('phi: ', phi_ps)
+        # print('H0: ', phi_ps[: 0])
+        # print('ombh2: ', phi_ps[: -1])
 
         # Find the DDPM timestep t_eff that "matches" the current sigma_CMB
         timesteps = self.get_closest_ddpm_timestep_from_sigma_cmb(sigma_cmb_from_phi) # [B_chains]
@@ -340,7 +340,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         max_timesteps = torch.max(timesteps)     
         mask = torch.ones(noisy_batch.shape[0], max_timesteps + 1).to(self.device)
 
-        print('mask: ', mask.shape, mask)
+        # print('mask: ', mask.shape, mask)
         
         for i in range(noisy_batch.shape[0]):
             mask[i, timesteps[i]+1:] = 0 ## activate denoising from the timsteps[i] step only.
