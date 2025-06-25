@@ -41,7 +41,7 @@ AS_FID = 2.1e-9  # Scalar amplitude (ln(10^10 As) = 3.044 => As ~ 2.1e-9)
 H0_PRIOR_MIN, H0_PRIOR_MAX = 50.0, 90.0
 OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX = 0.0075, 0.0567 # Note: paper uses omega_b, CAMB uses ombh2
 # To convert: omega_b = ombh2 / (H0/100)^2. For priors, it's easier to sample H0 and ombh2 directly.
-SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.2 # sigma_min should be >0. Let's use 0.1 for now.
+SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.35, 1.0 # sigma_min should be >0. Let's use 0.1 for now.
 
 
 SIMULATION_DICT = {
@@ -415,6 +415,8 @@ def generate_dataset_sample(index, seed_offset=0, verbose=False):
     # 2. Sample CMB parameters from prior
     h0_sample = np.random.uniform(H0_PRIOR_MIN, H0_PRIOR_MAX)
     ombh2_sample = np.random.uniform(OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX)
+    
+    ## NOTE: Use sigma_cmb akin to normal
     sigma_cmb_sample = np.random.uniform(SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX)
     
     cmb_params = {
@@ -425,7 +427,8 @@ def generate_dataset_sample(index, seed_offset=0, verbose=False):
 
     # 3. Generate CMB map
     cls_tt_sample = get_camb_cls(H0=h0_sample, ombh2=ombh2_sample)
-    cmb_map = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=sigma_cmb_sample, seed=current_seed_cmb)
+    cmb_map = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=current_seed_cmb)
+    # cmb_map = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=sigma_cmb_sample, seed=current_seed_cmb)
 
     if verbose:
     # 4. Create mixed map
@@ -450,7 +453,13 @@ def generate_dataset_sample(index, seed_offset=0, verbose=False):
     # print('Dust-Map: ', min(np.ravel(dust_map)), max(np.ravel(dust_map)))
     # print('CMB-Map: ', min(np.ravel(cmb_map)), max(np.ravel(cmb_map)))
 
-    mixed_map = dust_map + cmb_map
+    # Linear Mixing
+    # mixed_map = dust_map + cmb_map
+
+    # Diffusion-style mixing
+    sqrt_one_minus_sigma2 = np.sqrt(1.0 - sigma_cmb_sample ** 2)
+    mixed_map = sqrt_one_minus_sigma2 * dust_map + sigma_cmb_sample * cmb_map
+
     if verbose:
         print('Mixed-Map: ', min(np.ravel(cmb_map)), max(np.ravel(cmb_map)))
     
@@ -493,9 +502,22 @@ if __name__ == '__main__':
     ft = time.time()
     dust_maps, cmb_maps, mixed_maps, params_list = generate_mixed_dataset(NUM_SAMPLES_TO_GENERATE)
     lt = time.time()
+
     print('time-taken (mixed-map-generation): ', (lt - ft)/60, ' mins')
     print(dust_maps.shape, cmb_maps.shape, mixed_maps.shape, params_list.shape)
 
+    # print('params-list - ')
+    # print(params_list[0])
+
+    # plt.imshow(dust_maps[0].reshape(mixed_maps.shape[2], mixed_maps.shape[3], -1), cmap='coolwarm')
+    # plt.savefig('dust_map.png')
+
+    # plt.imshow(cmb_maps[0].reshape(mixed_maps.shape[2], mixed_maps.shape[3], -1), cmap='coolwarm')
+    # plt.savefig('cmb_map.png')
+
+    # plt.imshow(mixed_maps[0].reshape(mixed_maps.shape[2], mixed_maps.shape[3], -1), cmap='coolwarm')
+    # plt.savefig('mixed_map.png')
+    
     # print()
     # print(' ----- Testing-Secondary-Sampling-Performance (CMB) ----- ')
     

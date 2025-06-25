@@ -25,7 +25,7 @@ from ...utils.noise_create_2d import get_colored_noise_2d
 from ...utils.hmc_cosmo import *
 
 from pixell import enmap
-from ...utils.cosmo_create import get_cmb_noise_batch, load_random_sample_from_disk_batch
+from ...utils.cosmo_create import *
 
 import matplotlib.pyplot as plt
 import cv2
@@ -117,6 +117,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         self.lmap_fourier = lmap_tensor.to(self.device)
 
     def get_gdiff_loss(self, clean_dust_batch, ddpm_timesteps, phi_cmb_batch=None):
+        
         """
         Calculates the diffusion model training loss.
         clean_dust_batch: [B, C, H, W]
@@ -141,6 +142,8 @@ class GibbsDiff2D_cosmo(nn.Module):
         CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
         phi_cmb_batch = phi_cmb_batch.float()
         
+        print('phi_cmb_batch: ', torch.min(phi_cmb_batch.reshape(1, -1)[0]), torch.max(phi_cmb_batch.reshape(1, -1)[0]))
+        
         # 1. Get alpha_bar_t for the sampled DDPM timesteps
         # Squeeze ddpm_timesteps if it's [B,1]
         a_bar_t = extract(self.alpha_bar_t_ddpm, ddpm_timesteps.squeeze(-1) if ddpm_timesteps.ndim > 1 else ddpm_timesteps, clean_dust_batch.shape)
@@ -160,6 +163,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         
         ddpm_noise_eps = (CMB_maps - CMB_maps.mean(dim=(2, 3), keepdim=True)) / CMB_maps.std(dim=(2, 3), keepdim=True)  ## standardize ranges
         ddpm_noise_eps = ddpm_noise_eps.float()
+        print('ddpm_noise_eps: ', torch.min(ddpm_noise_eps.reshape(1, -1)[0]), torch.max(ddpm_noise_eps.reshape(1, -1)[0]))
         
         # plt.imshow(ddpm_noise_eps[0].cpu().numpy().reshape(64, 64, 1), cmap='coolwarm')
         # plt.savefig('ddpm_noise_eps.png')
@@ -171,7 +175,8 @@ class GibbsDiff2D_cosmo(nn.Module):
         # 4. Get model prediction (predicts the DDPM noise eps)
         # The model is conditioned on ddpm_timesteps and the true phi_cmb_batch
         predicted_ddpm_noise = self.model(z_t.float(), ddpm_timesteps.float(), phi_cmb=phi_cmb_batch)
-
+        print('predicted_ddpm_noise: ', torch.min(predicted_ddpm_noise.reshape(1, -1)[0]), torch.max(predicted_ddpm_noise.reshape(1, -1)[0]))
+        
         # 5. Calculate MSE loss
         loss = nn.functional.mse_loss(predicted_ddpm_noise, ddpm_noise_eps)
         return loss
@@ -188,6 +193,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         # Sample random DDPM timesteps for this batch
         t_ddpm = torch.randint(0, self.num_timesteps_ddpm, (b,), device=self.device).long()
         
+        print('clean_dust_img: ', torch.min(clean_dust_img.reshape(1, -1)[0]), torch.max(clean_dust_img.reshape(1, -1)[0]))
         return self.get_gdiff_loss(clean_dust_img, t_ddpm)
 
     def get_closest_ddpm_timestep_from_sigma_cmb(self, sigma_cmb_values): # sigma_cmb_values is [B_chains]
@@ -232,6 +238,8 @@ class GibbsDiff2D_cosmo(nn.Module):
         else:
             phi_cmb_cond = phi_cmb_cond.to(self.device).float()
 
+        ## NOTE: 1. Isotropic-Gaussian noise -> replication of noisy-image (expected)
+        ##       2. CMB sourcing -> CMB-GaussianNoise
         if t_ddpm > 1:
             if is_phys:
                 ## secondary_mem sampling (based on supplied physical_index)
@@ -240,13 +248,15 @@ class GibbsDiff2D_cosmo(nn.Module):
                 phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
                 z = enmap.read_map(phys_path)
                 z = cv2.resize(np.array(z), self.image_size_hw)
-                z = (z - np.mean(z)) / np.std(z)
+                z = (z - np.mean(z)) / np.std(z)                
                 z = z.reshape(*z_t.shape)
-                
-                # z, _ = get_colored_noise_2d(z_t.shape, phi_cmb_cond, device=self.device)
             else:
                 ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
-                pass
+                cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
+                z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None)
+                z = cv2.resize(np.array(z), self.image_size_hw)
+                z = (z - np.mean(z)) / np.std(z)                
+                z = z.reshape(*z_t.shape)
         else:
             z = 0
 
@@ -256,6 +266,8 @@ class GibbsDiff2D_cosmo(nn.Module):
         e_scale = self.beta_t_ddpm[t_ddpm] / math.sqrt(1 - self.alpha_bar_t_ddpm[t_ddpm])
         post_sigma = math.sqrt(self.beta_t_ddpm[t_ddpm]) * z
         z_t = pre_scale * (z_t - e_scale * e_hat) + post_sigma
+        
+        # print('z_t: ', torch.min(z_t.reshape(1, -1)[0]), torch.max(z_t.reshape(1, -1)[0]))
         
         return z_t
         
@@ -325,16 +337,32 @@ class GibbsDiff2D_cosmo(nn.Module):
         
         noisy_batch = y_observed_cmb_corrupted.clone() # Shape [B_chains, C, H, W]
         
-        max_timesteps = torch.max(timesteps)
+        max_timesteps = torch.max(timesteps)     
         mask = torch.ones(noisy_batch.shape[0], max_timesteps + 1).to(self.device)
 
+        print('mask: ', mask.shape, mask)
+        
         for i in range(noisy_batch.shape[0]):
-            mask[i, timesteps[i]+1:] = 0
+            mask[i, timesteps[i]+1:] = 0 ## activate denoising from the timsteps[i] step only.
 
-        for t in range(max_timesteps, 0, -1):
+        ## We mask the irrelevant steps and start every chain from the estimated closest time-step 
+        for t in range(max_timesteps, -1, -1):
             noisy_batch = self.denoise_1step_ancestral(noisy_batch, torch.tensor(t), phi_ps, is_phys=is_phys, phys_idx=phys_idx) * (mask[:, t]).reshape(-1, 1, 1, 1) + \
                           noisy_batch * (1 - mask[:, t]).reshape(-1, 1, 1, 1)
-
+            
+            if (t % 50) == 0 or (t == max_timesteps):
+                
+                fig, axs = plt.subplots(1, 2, figsize = (8, 4))
+                plot_batch = noisy_batch[0].cpu().numpy().reshape(noisy_batch.shape[2], noisy_batch.shape[3], -1)
+                
+                axs[0].hist(plot_batch.flatten(), bins=50, range=(0, 1), color='gray', alpha=0.7)
+                axs[0].set_title(f"Intensity Distribution at t={t}")
+                
+                axs[1].imshow(plot_batch, cmap='coolwarm')
+                axs[1].set_title(f't: {t}')
+                
+                plt.show()
+            
         if batch_origin is None:
             return noisy_batch
         else:
