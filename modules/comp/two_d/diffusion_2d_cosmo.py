@@ -249,13 +249,29 @@ class GibbsDiff2D_cosmo(nn.Module):
                 z = enmap.read_map(phys_path)
                 z = cv2.resize(np.array(z), self.image_size_hw)
                 z = (z - np.mean(z)) / np.std(z)                
+                
+                print('z: ', min(np.ravel(z)), max(np.ravel(z)))
+                
+                fig = plt.figure(figsize=(5, 5))
+                plt.imshow(z.reshape(*self.image_size_hw, -1), cmap='coolwarm')
+                plt.show()
+                
                 z = z.reshape(*z_t.shape)
+            
             else:
                 ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
+                # print('H0: ', phi_cmb_cond[:, 0], 'ombh2: ', phi_cmb_cond[:, 1])
                 cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
                 z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None)
                 z = cv2.resize(np.array(z), self.image_size_hw)
                 z = (z - np.mean(z)) / np.std(z)                
+
+                # print('z: ', min(np.ravel(z)), max(np.ravel(z)))
+            
+                # fig = plt.figure(figsize=(5, 5))
+                # plt.imshow(z.reshape(*self.image_size_hw, -1), cmap='coolwarm')
+                # plt.show()
+            
                 z = z.reshape(*z_t.shape)
         else:
             z = 0
