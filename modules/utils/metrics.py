@@ -58,7 +58,7 @@ def psnr_2d(img1, img2, data_range=1.0):
 
 def ssim_2d(img1, img2, data_range=1.0):
     '''
-    SSIM for 2D images of shape (B, C, H, W)
+    SSIM for 2D images of shape (B, H, W, C)
     '''
     img1 = ensure_numpy(img1)
     img2 = ensure_numpy(img2)
@@ -67,7 +67,7 @@ def ssim_2d(img1, img2, data_range=1.0):
         img1 = np.expand_dims(img1, axis=0)
         img2 = np.expand_dims(img2, axis=0)
 
-    b, c, h, w = img1.shape
+    b, h, w, c = img1.shape
 
     # Reshape for channel-wise SSIM computation
     # img1 = img1.transpose(0, 2, 3, 1)  # (B, H, W, C)
@@ -75,7 +75,7 @@ def ssim_2d(img1, img2, data_range=1.0):
 
     ssim_list = [
         skmetrics.structural_similarity(
-            img1[i], img2[i], data_range=data_range, channel_axis=1, win_size=3
+            img1[i], img2[i], data_range=data_range, channel_axis=-1, win_size=3
         )
         for i in range(b)
     ]

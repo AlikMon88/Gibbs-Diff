@@ -248,13 +248,17 @@ class GibbsDiff2D_cosmo(nn.Module):
                 phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
                 z = enmap.read_map(phys_path)
                 z = cv2.resize(np.array(z), self.image_size_hw)
+                
+                noise = np.random.normal(loc=0.0, scale=1e-1, size=z.shape) ## forceful noise injection | NOT correlated with the power spectrum of the CMB map 
+                z = z + noise ## Reduced Correlation
+                
                 z = (z - np.mean(z)) / np.std(z)                
                 
-                print('z: ', min(np.ravel(z)), max(np.ravel(z)))
+                # print('z: ', min(np.ravel(z)), max(np.ravel(z)))
                 
-                fig = plt.figure(figsize=(5, 5))
-                plt.imshow(z.reshape(*self.image_size_hw, -1), cmap='coolwarm')
-                plt.show()
+                # fig = plt.figure(figsize=(5, 5))
+                # plt.imshow(z.reshape(*self.image_size_hw, -1), cmap='coolwarm')
+                # plt.show()
                 
                 z = z.reshape(*z_t.shape)
             
@@ -262,7 +266,7 @@ class GibbsDiff2D_cosmo(nn.Module):
                 ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
                 # print('H0: ', phi_cmb_cond[:, 0], 'ombh2: ', phi_cmb_cond[:, 1])
                 cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
-                z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None)
+                z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None) ## seed=None for non-deterministic
                 z = cv2.resize(np.array(z), self.image_size_hw)
                 z = (z - np.mean(z)) / np.std(z)                
 
