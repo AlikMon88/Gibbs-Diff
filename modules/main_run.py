@@ -69,9 +69,9 @@ def get_hparams(mode = '1D'):
         extract_dir = 'data/'
         train_image_path, _ = tiny_imagenet_file_handler(extract_dir)
         params = {
-        'train_num_steps': 30001,
-        'init_size': (24, 24),
-        'diffusion_steps': 1500, ## ancestral sampling steps
+        'train_num_steps': 7501,
+        'init_size': (40, 40),
+        'diffusion_steps': 1200, ## ancestral sampling steps
         'train_batch_size': 32,
         'infer_phi': 1.0,
         'infer_sigma': 0.2,
@@ -297,7 +297,7 @@ def run_main(train_data, val_data, params, mode = '1D', is_plot=True):
             plot_curve(train_loss_curve, val_loss_curve_x, val_loss_curve_y, mode=mode)
 
         ### save gdiffusion_2d model in /saves
-        save_path = os.path.join(save_dir, 'gdiffusion_2d_model.pth')
+        save_path = os.path.join(save_dir, 'gdiffusion_2d_40x40_model.pth')
 
         torch.save({
         'model_state_dict': gdiffusion_2d.model.state_dict(),

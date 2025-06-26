@@ -117,9 +117,6 @@ def create_1d_data_colored(n_samples=1000, n_depth=100, phi=1.0, decay=0.1, sigm
 
     return observation.cpu().numpy(), signal.cpu().numpy(), noise.cpu().numpy()
 
-import torch
-import numpy as np
-
 def create_1d_data_colored_multi(n_samples=1000, n_depth=100, phi=1.0, decay=0.1, sigma=0.5, device=None):
     """
     Generate 1D noisy observations from colored noise and **randomized sinusoidal signals**.
