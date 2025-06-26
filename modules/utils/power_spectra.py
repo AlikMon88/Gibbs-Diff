@@ -117,6 +117,62 @@ def plot_power_spectra_comparison(noisy_image, true_signal, reconstructed_signal
     plt.tight_layout()
     plt.show()
 
+def plot_power_spectra_comparison_cosmo(noisy_image, true_signal, reconstructed_signal, true_noise, reconstructed_noise):
+    """Plots 1D radial power spectra and log-scale relative errors."""
+    
+    noisy_image = cv2.cvtColor(noisy_image, cv2.COLOR_BGR2GRAY)
+    true_signal = cv2.cvtColor(true_signal, cv2.COLOR_BGR2GRAY)
+    reconstructed_signal = cv2.cvtColor(reconstructed_signal, cv2.COLOR_BGR2GRAY)
+    true_noise = cv2.cvtColor(true_noise, cv2.COLOR_BGR2GRAY)
+    reconstructed_noise = cv2.cvtColor(reconstructed_noise, cv2.COLOR_BGR2GRAY)
+    
+    spectra = {
+        "Noisy": noisy_image,
+        "True Dust": true_signal,
+        "Reconstructed Dust": reconstructed_signal,
+        "True CMB": true_noise,
+        "Reconstructed CMB": reconstructed_noise
+    }
+
+    # Compute 1D radial power spectra
+    radial_spectra = {
+        name: radial_average(compute_power_spectrum(img)) for name, img in spectra.items()
+    }
+
+    # Compute relative error (in radial spectrum domain)
+    rel_error_signal = np.abs(radial_spectra["Reconstructed Dust"] - radial_spectra["True Dust"]) / \
+                       (np.abs(radial_spectra["True Dust"]) + 1e-8)
+    
+    rel_error_noise = np.abs(radial_spectra["Reconstructed CMB"] - radial_spectra["True CMB"]) / \
+                       (np.abs(radial_spectra["True CMB"]) + 1e-8)
+                       
+    # Plot 1D power spectra
+    fig, axs = plt.subplots(2, 1, figsize=(7, 8))
+    
+    for name, spectrum in radial_spectra.items():
+        axs[0].plot(np.log1p(spectrum), label=name)
+    
+    axs[0].set_title("Radially Averaged Power Spectra (log-scale)")
+    axs[0].set_xlabel("Radial Frequency")
+    axs[0].set_ylabel("log(1 + Power)")
+    axs[0].set_xscale('log')
+    axs[0].set_yscale('log')
+    axs[0].legend()
+    axs[0].grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    # Plot relative error (log scale)
+    axs[1].plot(np.log1p(rel_error_signal), label="Rel Error: Reconstructed vs True Dust", color='blue')
+    axs[1].plot(np.log1p(rel_error_noise), label="Rel Error: Reconstructed vs True CMB", color='red')
+    
+    axs[1].set_title("Relative Error in Power Spectrum (log-scale)")
+    axs[1].set_xlabel("Radial Frequency")
+    axs[1].set_ylabel("log(1 + Relative Error)")
+    axs[1].legend()
+    axs[1].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
 
 
 if __name__ == '__main__':
