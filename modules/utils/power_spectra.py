@@ -120,12 +120,6 @@ def plot_power_spectra_comparison(noisy_image, true_signal, reconstructed_signal
 def plot_power_spectra_comparison_cosmo(noisy_image, true_signal, reconstructed_signal, true_noise, reconstructed_noise):
     """Plots 1D radial power spectra and log-scale relative errors."""
     
-    noisy_image = cv2.cvtColor(noisy_image, cv2.COLOR_BGR2GRAY)
-    true_signal = cv2.cvtColor(true_signal, cv2.COLOR_BGR2GRAY)
-    reconstructed_signal = cv2.cvtColor(reconstructed_signal, cv2.COLOR_BGR2GRAY)
-    true_noise = cv2.cvtColor(true_noise, cv2.COLOR_BGR2GRAY)
-    reconstructed_noise = cv2.cvtColor(reconstructed_noise, cv2.COLOR_BGR2GRAY)
-    
     spectra = {
         "Noisy": noisy_image,
         "True Dust": true_signal,
@@ -157,6 +151,7 @@ def plot_power_spectra_comparison_cosmo(noisy_image, true_signal, reconstructed_
     axs[0].set_ylabel("log(1 + Power)")
     axs[0].set_xscale('log')
     axs[0].set_yscale('log')
+    axs[0].set_ylim(1.5)
     axs[0].legend()
     axs[0].grid(True, which='both', linestyle='--', linewidth=0.5)
 

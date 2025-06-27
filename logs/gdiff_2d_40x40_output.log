@@ -16,3 +16,207 @@ Loading python/3.9.12/gcc/pdcqf4o5
     libxft/2.3.2/gcc/zay6bixf libxext/1.3.3/gcc/p7y37pfb
     scrnsaverproto/1.2.2/gcc/fzbihsla libxscrnsaver/1.2.2/gcc/t5hd2qnu
     tk/8.6.11/gcc/vdahj5in
+running __run_main.py__ ...
+#train_images:  100000
+#test_images:  10000
+HyParams-Retrieved
+Dataset-Retrieved
+torch.Size([80000, 3, 40, 40]) torch.Size([20000, 3, 40, 40])
+started-training 2D ...
+(2, 3, 40, 40) (2,)
+- UNET-summary -
+____________________________________________________________________________________________________
+Model: Unet1D
+====================================================================================================
+Layer (type)                            Output Shape             Param #        
+====================================================================================================
+input_1 (InputLayer)                    (2, 3, 40, 40)           0              
+input_2 (InputLayer)                    (2,)                     0              
+init_conv.proj (Conv2d)                 (2, 36, 40, 40)          1008           
+init_conv.norm (GroupNorm)              (2, 36, 40, 40)          72             
+init_conv.act (SiLU)                    (2, 36, 40, 40)          0              
+init_conv.dropout (Dropout2d)           (2, 36, 40, 40)          0              
+down_blocks.0.block1.proj (Conv2d)      (2, 72, 40, 40)          23400          
+down_blocks.0.block1.norm (GroupNorm)   (2, 72, 40, 40)          144            
+down_blocks.0.block1.act (SiLU)         (2, 72, 40, 40)          0              
+down_blocks.0.block1.dropout (Dropout2d)(2, 72, 40, 40)          0              
+down_blocks.0.block1 (BlockGDiff2D)     (2, 72, 40, 40)          23544          
+down_blocks.0.block2.proj (Conv2d)      (2, 72, 40, 40)          46728          
+down_blocks.0.block2.norm (GroupNorm)   (2, 72, 40, 40)          144            
+down_blocks.0.block2.act (SiLU)         (2, 72, 40, 40)          0              
+down_blocks.0.block2.dropout (Dropout2d)(2, 72, 40, 40)          0              
+down_blocks.0.block2 (BlockGDiff2D)     (2, 72, 40, 40)          46872          
+down_blocks.0.res_conv (Conv2d)         (2, 72, 40, 40)          2664           
+down_blocks.0 (ResnetBlockGDiff2D)      (2, 72, 40, 40)          73080          
+time_embeddings.0 (TimeEmbedding2D)     (2, 72)                  0              
+alpha_embeddings.0.mlp.0 (Linear)       (2, 100)                 200            
+alpha_embeddings.0.mlp.1 (SiLU)         (2, 100)                 0              
+alpha_embeddings.0.mlp.2 (Linear)       (2, 100)                 10100          
+alpha_embeddings.0.mlp.3 (SiLU)         (2, 100)                 0              
+alpha_embeddings.0.mlp.4 (Linear)       (2, 72)                  7272           
+alpha_embeddings.0.mlp (Sequential)     (2, 72)                  17572          
+alpha_embeddings.0 (PhiEmbedding2D)     (2, 72)                  17572          
+down_blocks.1.block1.proj (Conv2d)      (2, 144, 40, 40)         93456          
+down_blocks.1.block1.norm (GroupNorm)   (2, 144, 40, 40)         288            
+down_blocks.1.block1.act (SiLU)         (2, 144, 40, 40)         0              
+down_blocks.1.block1.dropout (Dropout2d)(2, 144, 40, 40)         0              
+down_blocks.1.block1 (BlockGDiff2D)     (2, 144, 40, 40)         93744          
+down_blocks.1.block2.proj (Conv2d)      (2, 144, 40, 40)         186768         
+down_blocks.1.block2.norm (GroupNorm)   (2, 144, 40, 40)         288            
+down_blocks.1.block2.act (SiLU)         (2, 144, 40, 40)         0              
+down_blocks.1.block2.dropout (Dropout2d)(2, 144, 40, 40)         0              
+down_blocks.1.block2 (BlockGDiff2D)     (2, 144, 40, 40)         187056         
+down_blocks.1.res_conv (Conv2d)         (2, 144, 40, 40)         10512          
+down_blocks.1 (ResnetBlockGDiff2D)      (2, 144, 40, 40)         291312         
+time_embeddings.1 (TimeEmbedding2D)     (2, 144)                 0              
+alpha_embeddings.1.mlp.0 (Linear)       (2, 100)                 200            
+alpha_embeddings.1.mlp.1 (SiLU)         (2, 100)                 0              
+alpha_embeddings.1.mlp.2 (Linear)       (2, 100)                 10100          
+alpha_embeddings.1.mlp.3 (SiLU)         (2, 100)                 0              
+alpha_embeddings.1.mlp.4 (Linear)       (2, 144)                 14544          
+alpha_embeddings.1.mlp (Sequential)     (2, 144)                 24844          
+alpha_embeddings.1 (PhiEmbedding2D)     (2, 144)                 24844          
+down_blocks.2.block1.proj (Conv2d)      (2, 288, 40, 40)         373536         
+down_blocks.2.block1.norm (GroupNorm)   (2, 288, 40, 40)         576            
+down_blocks.2.block1.act (SiLU)         (2, 288, 40, 40)         0              
+down_blocks.2.block1.dropout (Dropout2d)(2, 288, 40, 40)         0              
+down_blocks.2.block1 (BlockGDiff2D)     (2, 288, 40, 40)         374112         
+down_blocks.2.block2.proj (Conv2d)      (2, 288, 40, 40)         746784         
+down_blocks.2.block2.norm (GroupNorm)   (2, 288, 40, 40)         576            
+down_blocks.2.block2.act (SiLU)         (2, 288, 40, 40)         0              
+down_blocks.2.block2.dropout (Dropout2d)(2, 288, 40, 40)         0              
+down_blocks.2.block2 (BlockGDiff2D)     (2, 288, 40, 40)         747360         
+down_blocks.2.res_conv (Conv2d)         (2, 288, 40, 40)         41760          
+down_blocks.2 (ResnetBlockGDiff2D)      (2, 288, 40, 40)         1163232        
+time_embeddings.2 (TimeEmbedding2D)     (2, 288)                 0              
+alpha_embeddings.2.mlp.0 (Linear)       (2, 100)                 200            
+alpha_embeddings.2.mlp.1 (SiLU)         (2, 100)                 0              
+alpha_embeddings.2.mlp.2 (Linear)       (2, 100)                 10100          
+alpha_embeddings.2.mlp.3 (SiLU)         (2, 100)                 0              
+alpha_embeddings.2.mlp.4 (Linear)       (2, 288)                 29088          
+alpha_embeddings.2.mlp (Sequential)     (2, 288)                 39388          
+alpha_embeddings.2 (PhiEmbedding2D)     (2, 288)                 39388          
+attn_blocks.2.to_qkv (Conv2d)           (2, 384, 40, 40)         110592         
+attn_blocks.2.to_out (Conv2d)           (2, 288, 40, 40)         37152          
+attn_blocks.2 (SelfAttention2D)         (2, 288, 40, 40)         147744         
+down_blocks.3.block1.proj (Conv2d)      (2, 576, 40, 40)         1493568        
+down_blocks.3.block1.norm (GroupNorm)   (2, 576, 40, 40)         1152           
+down_blocks.3.block1.act (SiLU)         (2, 576, 40, 40)         0              
+down_blocks.3.block1.dropout (Dropout2d)(2, 576, 40, 40)         0              
+down_blocks.3.block1 (BlockGDiff2D)     (2, 576, 40, 40)         1494720        
+down_blocks.3.block2.proj (Conv2d)      (2, 576, 40, 40)         2986560        
+down_blocks.3.block2.norm (GroupNorm)   (2, 576, 40, 40)         1152           
+down_blocks.3.block2.act (SiLU)         (2, 576, 40, 40)         0              
+down_blocks.3.block2.dropout (Dropout2d)(2, 576, 40, 40)         0              
+down_blocks.3.block2 (BlockGDiff2D)     (2, 576, 40, 40)         2987712        
+down_blocks.3.res_conv (Conv2d)         (2, 576, 40, 40)         166464         
+down_blocks.3 (ResnetBlockGDiff2D)      (2, 576, 40, 40)         4648896        
+time_embeddings.3 (TimeEmbedding2D)     (2, 576)                 0              
+alpha_embeddings.3.mlp.0 (Linear)       (2, 100)                 200            
+alpha_embeddings.3.mlp.1 (SiLU)         (2, 100)                 0              
+alpha_embeddings.3.mlp.2 (Linear)       (2, 100)                 10100          
+alpha_embeddings.3.mlp.3 (SiLU)         (2, 100)                 0              
+alpha_embeddings.3.mlp.4 (Linear)       (2, 576)                 58176          
+alpha_embeddings.3.mlp (Sequential)     (2, 576)                 68476          
+alpha_embeddings.3 (PhiEmbedding2D)     (2, 576)                 68476          
+attn_blocks.3.to_qkv (Conv2d)           (2, 384, 40, 40)         221184         
+attn_blocks.3.to_out (Conv2d)           (2, 576, 40, 40)         74304          
+attn_blocks.3 (SelfAttention2D)         (2, 576, 40, 40)         295488         
+bottleneck.proj (Conv2d)                (2, 576, 40, 40)         2986560        
+bottleneck.norm (GroupNorm)             (2, 576, 40, 40)         1152           
+bottleneck.act (SiLU)                   (2, 576, 40, 40)         0              
+bottleneck.dropout (Dropout2d)          (2, 576, 40, 40)         0              
+time_embeddings.3 (TimeEmbedding2D)     (2, 576)                 0              
+att_bottleneck.to_qkv (Conv2d)          (2, 384, 40, 40)         221184         
+att_bottleneck.to_out (Conv2d)          (2, 576, 40, 40)         74304          
+bottl_down.proj (Conv2d)                (2, 288, 40, 40)         1493280        
+bottl_down.norm (GroupNorm)             (2, 288, 40, 40)         576            
+bottl_down.act (SiLU)                   (2, 288, 40, 40)         0              
+bottl_down.dropout (Dropout2d)          (2, 288, 40, 40)         0              
+up_blocks.0.block1.proj (Conv2d)        (2, 288, 40, 40)         2239776        
+up_blocks.0.block1.norm (GroupNorm)     (2, 288, 40, 40)         576            
+up_blocks.0.block1.act (SiLU)           (2, 288, 40, 40)         0              
+up_blocks.0.block1.dropout (Dropout2d)  (2, 288, 40, 40)         0              
+up_blocks.0.block1 (BlockGDiff2D)       (2, 288, 40, 40)         2240352        
+up_blocks.0.block2.proj (Conv2d)        (2, 288, 40, 40)         746784         
+up_blocks.0.block2.norm (GroupNorm)     (2, 288, 40, 40)         576            
+up_blocks.0.block2.act (SiLU)           (2, 288, 40, 40)         0              
+up_blocks.0.block2.dropout (Dropout2d)  (2, 288, 40, 40)         0              
+up_blocks.0.block2 (BlockGDiff2D)       (2, 288, 40, 40)         747360         
+up_blocks.0.res_conv (Conv2d)           (2, 288, 40, 40)         249120         
+up_blocks.0 (ResnetBlockGDiff2D)        (2, 288, 40, 40)         3236832        
+time_embeddings_up.0 (TimeEmbedding2D)  (2, 288)                 0              
+alpha_embeddings_up.0.mlp.0 (Linear)    (2, 100)                 200            
+alpha_embeddings_up.0.mlp.1 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.0.mlp.2 (Linear)    (2, 100)                 10100          
+alpha_embeddings_up.0.mlp.3 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.0.mlp.4 (Linear)    (2, 288)                 29088          
+alpha_embeddings_up.0.mlp (Sequential)  (2, 288)                 39388          
+alpha_embeddings_up.0 (PhiEmbedding2D)  (2, 288)                 39388          
+up_blocks.1.block1.proj (Conv2d)        (2, 144, 40, 40)         746640         
+up_blocks.1.block1.norm (GroupNorm)     (2, 144, 40, 40)         288            
+up_blocks.1.block1.act (SiLU)           (2, 144, 40, 40)         0              
+up_blocks.1.block1.dropout (Dropout2d)  (2, 144, 40, 40)         0              
+up_blocks.1.block1 (BlockGDiff2D)       (2, 144, 40, 40)         746928         
+up_blocks.1.block2.proj (Conv2d)        (2, 144, 40, 40)         186768         
+up_blocks.1.block2.norm (GroupNorm)     (2, 144, 40, 40)         288            
+up_blocks.1.block2.act (SiLU)           (2, 144, 40, 40)         0              
+up_blocks.1.block2.dropout (Dropout2d)  (2, 144, 40, 40)         0              
+up_blocks.1.block2 (BlockGDiff2D)       (2, 144, 40, 40)         187056         
+up_blocks.1.res_conv (Conv2d)           (2, 144, 40, 40)         83088          
+up_blocks.1 (ResnetBlockGDiff2D)        (2, 144, 40, 40)         1017072        
+time_embeddings_up.1 (TimeEmbedding2D)  (2, 144)                 0              
+alpha_embeddings_up.1.mlp.0 (Linear)    (2, 100)                 200            
+alpha_embeddings_up.1.mlp.1 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.1.mlp.2 (Linear)    (2, 100)                 10100          
+alpha_embeddings_up.1.mlp.3 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.1.mlp.4 (Linear)    (2, 144)                 14544          
+alpha_embeddings_up.1.mlp (Sequential)  (2, 144)                 24844          
+alpha_embeddings_up.1 (PhiEmbedding2D)  (2, 144)                 24844          
+up_blocks.2.block1.proj (Conv2d)        (2, 72, 40, 40)          186696         
+up_blocks.2.block1.norm (GroupNorm)     (2, 72, 40, 40)          144            
+up_blocks.2.block1.act (SiLU)           (2, 72, 40, 40)          0              
+up_blocks.2.block1.dropout (Dropout2d)  (2, 72, 40, 40)          0              
+up_blocks.2.block1 (BlockGDiff2D)       (2, 72, 40, 40)          186840         
+up_blocks.2.block2.proj (Conv2d)        (2, 72, 40, 40)          46728          
+up_blocks.2.block2.norm (GroupNorm)     (2, 72, 40, 40)          144            
+up_blocks.2.block2.act (SiLU)           (2, 72, 40, 40)          0              
+up_blocks.2.block2.dropout (Dropout2d)  (2, 72, 40, 40)          0              
+up_blocks.2.block2 (BlockGDiff2D)       (2, 72, 40, 40)          46872          
+up_blocks.2.res_conv (Conv2d)           (2, 72, 40, 40)          20808          
+up_blocks.2 (ResnetBlockGDiff2D)        (2, 72, 40, 40)          254520         
+time_embeddings_up.2 (TimeEmbedding2D)  (2, 72)                  0              
+alpha_embeddings_up.2.mlp.0 (Linear)    (2, 100)                 200            
+alpha_embeddings_up.2.mlp.1 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.2.mlp.2 (Linear)    (2, 100)                 10100          
+alpha_embeddings_up.2.mlp.3 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.2.mlp.4 (Linear)    (2, 72)                  7272           
+alpha_embeddings_up.2.mlp (Sequential)  (2, 72)                  17572          
+alpha_embeddings_up.2 (PhiEmbedding2D)  (2, 72)                  17572          
+up_blocks.3.block1.proj (Conv2d)        (2, 36, 40, 40)          46692          
+up_blocks.3.block1.norm (GroupNorm)     (2, 36, 40, 40)          72             
+up_blocks.3.block1.act (SiLU)           (2, 36, 40, 40)          0              
+up_blocks.3.block1.dropout (Dropout2d)  (2, 36, 40, 40)          0              
+up_blocks.3.block1 (BlockGDiff2D)       (2, 36, 40, 40)          46764          
+up_blocks.3.block2.proj (Conv2d)        (2, 36, 40, 40)          11700          
+up_blocks.3.block2.norm (GroupNorm)     (2, 36, 40, 40)          72             
+up_blocks.3.block2.act (SiLU)           (2, 36, 40, 40)          0              
+up_blocks.3.block2.dropout (Dropout2d)  (2, 36, 40, 40)          0              
+up_blocks.3.block2 (BlockGDiff2D)       (2, 36, 40, 40)          11772          
+up_blocks.3.res_conv (Conv2d)           (2, 36, 40, 40)          5220           
+up_blocks.3 (ResnetBlockGDiff2D)        (2, 36, 40, 40)          63756          
+time_embeddings_up.3 (TimeEmbedding2D)  (2, 36)                  0              
+alpha_embeddings_up.3.mlp.0 (Linear)    (2, 100)                 200            
+alpha_embeddings_up.3.mlp.1 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.3.mlp.2 (Linear)    (2, 100)                 10100          
+alpha_embeddings_up.3.mlp.3 (SiLU)      (2, 100)                 0              
+alpha_embeddings_up.3.mlp.4 (Linear)    (2, 36)                  3636           
+alpha_embeddings_up.3.mlp (Sequential)  (2, 36)                  13936          
+alpha_embeddings_up.3 (PhiEmbedding2D)  (2, 36)                  13936          
+outc.final_regress_layer (Conv2d)       (2, 3, 40, 40)           111            
+====================================================================================================
+Total params: 16,216,199
+Trainable params: 16,216,199
+Non-trainable params: 0
+____________________________________________________________________________________________________
+Validation-Stepper:  25

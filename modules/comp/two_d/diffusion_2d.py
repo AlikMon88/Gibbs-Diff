@@ -74,8 +74,8 @@ class GibbsDiff2D(nn.Module):
         self.model = model
         self.device = model.device
         self.num_timesteps = num_timesteps
-        self.image_size = image_size  # (H, W)
-        self.channels = 3
+        self.image_size = image_size  # (C, H, W)
+        self.channels = image_size[0]
         
         # HMC parameters (can be tuned)
         self.hmc_n_leapfrog_steps = hmc_n_leapfrog_steps
@@ -258,7 +258,7 @@ class GibbsDiff2D(nn.Module):
         # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
 
         phi_all_posterior = phi_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, 2)
-        x_denoised_posterior = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, self.channels, self.image_size[0], self.image_size[-1])
+        x_denoised_posterior = x_all[:, -avg_pmean:].reshape(num_chains_per_sample, -1, avg_pmean, self.channels, self.image_size[-2], self.image_size[-1])
 
         x_denoised_pmean = x_denoised_posterior.mean(dim=(0, 2)) ## Each batch-sample will have num_chain_per_sample distinct MCMC chain - each chain of (n_it_gibbs + n_it_burnin) chain length 
         phi_all_mean = phi_all_posterior.mean(dim=(0, 2))
