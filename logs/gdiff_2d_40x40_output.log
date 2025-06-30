@@ -220,3 +220,5 @@ Trainable params: 16,216,199
 Non-trainable params: 0
 ____________________________________________________________________________________________________
 Validation-Stepper:  25
+Training complete.
+trained and saved (2D) in 164.17789574861527 mins

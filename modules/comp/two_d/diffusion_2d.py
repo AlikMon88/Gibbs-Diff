@@ -63,9 +63,9 @@ class GibbsDiff2D(nn.Module):
         *,
         image_size,
         num_timesteps=1000,
-        hmc_chain_length = 10,
-        hmc_n_leapfrog_steps = 5,
-        hmc_burnin_steps = 4,
+        hmc_chain_length = 30,
+        hmc_n_leapfrog_steps = 20,
+        hmc_burnin_steps = 15,
         hmc_adapt_stepsize_iters = 5,
         sampling_timesteps=None):
 
@@ -139,7 +139,7 @@ class GibbsDiff2D(nn.Module):
     
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False, sampler_v2=False):
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False, sampler_v2=False, is_debug=False, sup_residual=None):
 
         device = self.model.device
 
@@ -166,9 +166,24 @@ class GibbsDiff2D(nn.Module):
     
         phi_init_all = torch.cat([phi_init, sigma_init], dim=1)  # (B*C, 2)
         # print('phi_init: ', phi_init_all, phi_init_all.shape)
-        phi_all = [phi_init_all]
 
+        phi_all = [phi_init_all]
+        phi_init_denorm = phi_init_all.clone()
+        phi_init_denorm[:, 0] = unnormalize_phi(phi_init_denorm[:, 0])
+        phi_all_denorm = [phi_init_denorm]
+        
         phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device)
+        norm_phi_bounds = normalize_phi(torch.tensor([phi_all_min[0], phi_all_max[0]]))
+        phi_all_min[0], phi_all_max[0] = norm_phi_bounds[0], norm_phi_bounds[1]
+        
+        print(' --- Initial-Phi (norm) ---')
+        print(phi_init_all)
+        
+        print(' --- Initial-Phi (denorm) ---')
+        print(phi_init_denorm)
+        
+        print('phi_all_min: ', phi_all_min)
+        print('phi_all_max: ', phi_all_max)
 
         x_all = []
         step_size = None
@@ -183,11 +198,11 @@ class GibbsDiff2D(nn.Module):
         ## HMC-Sampler
         if sampler_v2:
             hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc_v2(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.hmc_n_leapfrog_steps, chain_length=self.hmc_chain_length, burnin_steps=self.hmc_burnin_steps, \
-            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.hmc_adapt_stepsize_iters, phi_min_norm=None, phi_max_norm=None) 
+            adapt=adapt, inv_mass_matrix=inv_mass_matrix, phi_min_norm=phi_all_min, phi_max_norm=phi_all_max) 
 
         else:
             hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.hmc_n_leapfrog_steps, chain_length=self.hmc_chain_length, burnin_steps=self.hmc_burnin_steps, \
-            inv_mass_matrix=inv_mass_matrix, adapt=adapt, n_adapt=self.hmc_adapt_stepsize_iters, phi_min_norm=None, phi_max_norm=None)
+            adapt=adapt, q_min_bounds=phi_all_min, q_max_bounds=phi_all_max)
 
         hmc_accept_list = []
 
@@ -201,9 +216,19 @@ class GibbsDiff2D(nn.Module):
             # print()
 
             # Step 1: DDOM Posterior Sampling
-            t = self.get_closest_timestep(phi[:, 1])  # sigma values | to find the closest-timestep : t-indexing
-            x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...) # phi for noise-params
-            epsilon = (y - x)
+            ### DEBUGGING: Bypass the DDPM sampler
+            if is_debug and sup_residual is not None:
+                epsilon = sup_residual
+                var_eps = torch.mean(torch.var(epsilon, dim=-1))
+                # print('epsilon-varaiance: ', torch.sqrt(var_eps))
+                x = y - epsilon
+                
+            else: 
+                # Step 1: DDOM Posterior Sampling
+                t = self.get_closest_timestep(phi[:, 1])  # sigma values
+                x = self.denoise_samples_batch_time(yt, t, phi_ps=phi[:, :1])  # (B*C, ...)
+                epsilon = (y - x)
+            
             # print('epsilon:')
             # print(torch.mean(epsilon, dim=-1))
 
@@ -223,37 +248,48 @@ class GibbsDiff2D(nn.Module):
                 # print('logp.requires_grad:', logp.requires_grad)
                 # print('logp.grad_fn:', logp.grad_fn)
                 grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
-                return grad_phi
+                return grad_phi.detach()
 
             if i == 0:
                 # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
-                phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.1, inv_mass_matrix=None, adapt=True)
-           
+                phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.01, inv_mass_matrix=None, adapt=True)
+                 
             else:
-                phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+                # phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
                 phi_new, hmc_accept_mean = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
                 hmc_accept_list.append(hmc_accept_mean)
+                
 
+            phi_denorm = phi_new.clone()
+            phi_denorm[:, 0] = unnormalize_phi(phi_denorm[:, 0])
             phi_all.append(phi_new)
+            
+            # print('Gibbs (phi_norm)')
+            # print(phi_new)
+            
+            # print('Gibbs (phi_denorm)')
+            # print(phi_denorm)
+            
+            phi_all_denorm.append(phi_denorm)
             x_all.append(x)
-
+        
         ## After phi distrib convergence
         print('HMC-last-state-Acceptance-Probability: ', hmc_accept_mean)
         print('HMC-mean-accept-proba: ', np.mean(np.array(hmc_accept_list), axis=0))
 
         if return_chains:
             ## returns the entire gibbs chain
-            return torch.stack(phi_all, dim=1).detach().cpu(), torch.stack(x_all, dim=1).detach().cpu()  # (B*C, steps, ...)
+            return torch.stack(phi_all_denorm, dim=1).detach().cpu(), torch.stack(phi_all, dim=1).detach().cpu(), torch.stack(x_all, dim=1).detach().cpu()  # (B*C, steps, ...)
         else:
             ## returns the last gibbs state
-            return phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
+            return phi_all_denorm[-1].detach().cpu(), phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
 
     ## there are 2 MCMC (HMC and Gibbs) chains we talk about the gibbs chain ofc 
-    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False, sampler_v2=False): ## last avg_pmean positions
+    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False, sampler_v2=False, is_debug=True, sup_residual=None): ## last avg_pmean positions
         
         '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
 
-        phi_all, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True, sampler_v2=sampler_v2)
+        phi_all, phi_all_norm, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True, sampler_v2=sampler_v2, is_debug=is_debug, sup_residual=sup_residual)
         # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
         # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)
 
