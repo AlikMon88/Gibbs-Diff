@@ -551,7 +551,7 @@ class ColoredPowerSpectrum1D(nn.Module):
         # S is [1,1,N], phi_physical is [B,1] -> reshaped to [B,1,1]
         ps = self.S ** phi_physical.reshape(-1, 1, 1)
         # Normalize each power spectrum in the batch to have a mean of 1
-        ps = ps / ps.mean(dim=1, keepdim=True)
+        ps = ps / ps.mean(dim=-1, keepdim=True)
         return ps
 
 # (ColoredPowerSpectrum2D would be analogous)

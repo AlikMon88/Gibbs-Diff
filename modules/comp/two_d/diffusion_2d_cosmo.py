@@ -154,6 +154,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         ''' 
         ADD CMB gaussian like distribution (noise) dynamically [REALLY-SLOW] 
         I can uniformly sample from secondary memory created_data/cmb_maps + params 
+        OR USE Power-Spectrum based one
         ''' 
         
         # Shape: (B, C, H, W) | do I standardize it?
@@ -265,8 +266,12 @@ class GibbsDiff2D_cosmo(nn.Module):
             else:
                 ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
                 # print('H0: ', phi_cmb_cond[:, 0], 'ombh2: ', phi_cmb_cond[:, 1])
-                cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
-                z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None) ## seed=None for non-deterministic
+                # cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
+                # z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None) ## seed=None for non-deterministic
+                
+                ''' Power-Spectrum Based ''' 
+                z = get_direct_cmb_maps(phi, ps_model, device=None)
+                
                 z = cv2.resize(np.array(z), self.image_size_hw)
                 z = (z - np.mean(z)) / np.std(z)                
 

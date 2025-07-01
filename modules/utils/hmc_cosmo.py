@@ -35,12 +35,26 @@ AS_FID = 2.1e-9  # Scalar amplitude (ln(10^10 As) = 3.044 => As ~ 2.1e-9)
 H0_PRIOR_MIN, H0_PRIOR_MAX = 50.0, 90.0
 OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX = 0.0075, 0.0567 # Note: paper uses omega_b, CAMB uses ombh2
 # To convert: omega_b = ombh2 / (H0/100)^2. For priors, it's easier to sample H0 and ombh2 directly.
-SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.2 # sigma_min should be >0. Let's use 0.1 for now.
+SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.0 # sigma_min should be >0. Let's use 0.1 for now.
 
 
 # --- Caching ---
 _camb_cls_cache = {}
 _lmap_cache_cosmo = {}
+
+
+physical_mins = torch.tensor([SIGMA_MIN, H0_MIN, OMBH2_MIN])
+physical_maxs = torch.tensor([SIGMA_MAX, H0_MAX, OMBH2_MAX])
+
+def normalize_phi_cmb(phi_physical, mins=physical_mins, maxs=physical_maxs):
+    """Maps a physical Phi_CMB vector to the internal [0, 1] range."""
+    mins, maxs = mins.to(phi_physical.device), maxs.to(phi_physical.device)
+    return (phi_physical - mins) / (maxs - mins)
+
+def unnormalize_phi_cmb(phi_normalized, mins=physical_mins, maxs=physical_maxs):
+    """Maps an internal [0, 1] vector back to its physical range."""
+    mins, maxs = mins.to(phi_normalized.device), maxs.to(phi_normalized.device)
+    return phi_normalized * (maxs - mins) + mins
 
 # --- Cosmology Specific Likelihood & Prior ---
 
