@@ -166,7 +166,7 @@ class ColoredPowerSpectrum1D(nn.Module):
         batch_size, dim = phi.shape[0], self.S.shape[1]
         S = self.S.repeat(batch_size, dim, 1)  # shape: (batch_size, dim, N)
         S = S ** phi.reshape(-1, 1, 1)         # shape: (batch_size, dim, N)
-        S = S / S.mean(dim=1, keepdim=True)    # Normalize spectrum
+        S = S / S.mean(dim=-1, keepdim=True)    # Normalize spectrum
         return S
 
 
@@ -317,28 +317,58 @@ def dKE_dp_v2(p, inv_mass_matrix):
 def hamiltonian_v2(q, p, log_prob_fn, inv_mass_matrix):
     return -log_prob_fn(q) + kinetic_energy_v2(p, inv_mass_matrix)
 
-def leapfrog_v2(q, p, step_size, n_steps, log_grad_fn, inv_mass_matrix):
+def leapfrog_v2(q, p, step_size, n_steps, log_grad_fn, inv_mass_matrix, 
+                q_min_bounds=None, q_max_bounds=None):
     """
     log_grad_fn returns d(log_prob)/dq.
     Force F = d(log_prob)/dq. Momentum update p' = p + eps * F.
     """
-    q_curr = q.clone()
-    p_curr = p.clone()
+    
+    q = q.clone()
+    p = p.clone()
     
     # Initial half-step for momentum
-    p_curr = p_curr + 0.5 * step_size * log_grad_fn(q_curr)
+    p = p + 0.5 * step_size * log_grad_fn(q)
 
     # Full steps
     for _ in range(n_steps - 1):
-        q_curr = q_curr + step_size * dKE_dp_v2(p_curr, inv_mass_matrix)
-        p_curr = p_curr + step_size * log_grad_fn(q_curr)
+        q = q + step_size * dKE_dp_v2(p, inv_mass_matrix)
+        
+        # --- Boundary Reflection for q ---
+        if q_min_bounds is not None and q_max_bounds is not None:
+            for dim_i in range(q.shape[-1]):
+                crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
+                crossed_max = q[..., dim_i] > q_max_bounds[dim_i]
+                if torch.any(crossed_min):
+                    q[crossed_min, dim_i] = q_min_bounds[dim_i] + (q_min_bounds[dim_i] - q[crossed_min, dim_i])
+                    p[crossed_min, dim_i] = -p[crossed_min, dim_i]
+                if torch.any(crossed_max):
+                    q[crossed_max, dim_i] = q_max_bounds[dim_i] - (q[crossed_max, dim_i] - q_max_bounds[dim_i])
+                    p[crossed_max, dim_i] = -p[crossed_max, dim_i]
+        # --- End Boundary Reflection ---
+        
+        p = p + step_size * log_grad_fn(q)
     
     # Final full step for position and half-step for momentum
-    q_curr = q_curr + step_size * dKE_dp_v2(p_curr, inv_mass_matrix)
-    p_curr = p_curr + 0.5 * step_size * log_grad_fn(q_curr)
+    q = q + step_size * dKE_dp_v2(p, inv_mass_matrix)
     
-    p_curr = -p_curr  # Negate momentum for detailed balance
-    return q_curr, p_curr
+    # --- Boundary Reflection for q ---
+    if q_min_bounds is not None and q_max_bounds is not None:
+        for dim_i in range(q.shape[-1]):
+            crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
+            crossed_max = q[..., dim_i] > q_max_bounds[dim_i]
+            if torch.any(crossed_min):
+                q[crossed_min, dim_i] = q_min_bounds[dim_i] + (q_min_bounds[dim_i] - q[crossed_min, dim_i])
+                p[crossed_min, dim_i] = -p[crossed_min, dim_i]
+            if torch.any(crossed_max):
+                q[crossed_max, dim_i] = q_max_bounds[dim_i] - (q[crossed_max, dim_i] - q_max_bounds[dim_i])
+                p[crossed_max, dim_i] = -p[crossed_max, dim_i]
+    # --- End Boundary Reflection ---
+
+    p = p + 0.5 * step_size * log_grad_fn(q)
+    
+    p = -p  # Negate momentum for detailed balance
+    return q, p
 
 class DualAveragingStepSize: # User's class with minor adjustments
     def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10, kappa=0.75):
@@ -372,7 +402,7 @@ class DualAveragingStepSize: # User's class with minor adjustments
     def get_final_step_size(self):
         return np.exp(self.log_step_bar) # Return smoothed/averaged step size
 
-def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step_size=0.1, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
+def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step_size=0.01, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
     
     q = phi_init.clone()
     if q.ndim == 1: q = q.unsqueeze(0)
@@ -394,16 +424,17 @@ def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step
         ''' Might need to sample from ~ (0, M) | Read the theory better | relates to Remannian Manifold MCMC (mass-matrix: M(q) current state: q) '''
         p_original = torch.randn_like(q) # p_original ~ N(0,I) : Need to p_tilde = N(0, M) by transforming momentum variable
 
-        q_new, p_new_proposed = leapfrog_v2(q, p_original, current_step_size, n_leapfrog_steps, log_grad_fn, inv_mass_matrix)
+        q_new, p_new_proposed = leapfrog_v2(q, p_original, current_step_size, n_leapfrog_steps, log_grad_fn, inv_mass_matrix, q_min_bounds=phi_min_norm, q_max_bounds=phi_max_norm)
         
         p_final_proposal = p_new_proposed # p_final_proposal already has momentum negated from leapfrog
 
-        if phi_min_norm is not None and phi_max_norm is not None:
-            # Pass q_new to check boundary condition on the proposed state.
-            # Pass p_original as the momentum before leapfrog if that's the desired reflection logic.
-            p_final_proposal = reflect_boundary(q_new, p_original, p_final_proposal, phi_min_norm, phi_max_norm)
+        # if phi_min_norm is not None and phi_max_norm is not None:
+        #     # Pass q_new to check boundary condition on the proposed state.
+        #     # Pass p_original as the momentum before leapfrog if that's the desired reflection logic.
+        #     p_final_proposal = reflect_boundary(q_new, p_original, p_final_proposal, phi_min_norm, phi_max_norm)
 
         H_old = hamiltonian_v2(q, p_original, log_prob_fn, inv_mass_matrix)
+        
         # Hamiltonian for proposed state uses q_new and p_final_proposal (which includes negation from leapfrog)
         H_new = hamiltonian_v2(q_new, p_final_proposal, log_prob_fn, inv_mass_matrix)
 
@@ -413,12 +444,7 @@ def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step
         accept_mask = torch.rand(batch_size, device=q.device) < accept_prob
         q[accept_mask] = q_new[accept_mask]
 
-        # if adapt:
-        #     if i <= n_adapt:
-        #         current_step_size = step_size_adapter.update(accept_prob.mean().item())
-        #     elif i == n_adapt + 1: # First step after adaptation window closes
-        #          current_step_size = step_size_adapter.get_final_step_size()
-
+    
         ## Changing mass-matrix through state-accumulation
         if adapt:
             if i <= n_adapt:
@@ -463,60 +489,5 @@ def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step
         return final_q, mean_accept_prob
 
 
-# --- Dummy functions for testing ---
-def dummy_log_posterior(phi_tensor):
-    return -0.5 * torch.sum(phi_tensor**2, dim=-1)
-
-def dummy_log_posterior_grad(phi_tensor):
-    return -phi_tensor
-
 if __name__ == '__main__':
-    print("Running HMC V2 example:")
-    num_chains = 5
-    dim = 2
-    phi_initial = torch.randn(num_chains, dim) * 2.0 # Start further from mode
-
-    common_sampling_params = {
-        "log_prob_fn": dummy_log_posterior,
-        "log_grad_fn": dummy_log_posterior_grad,
-        "phi_init": phi_initial.clone(),
-        "step_size": 0.2, # Adjusted for potentially better initial acceptance
-        "n_leapfrog_steps": 20,
-        "chain_length": 500,
-        "burnin_steps": 200,
-        "adapt": True,
-        "n_adapt": 150 # Adaptation steps
-    }
-
-    print(f"Initial phi mean: {phi_initial.mean(dim=0)}")
-
-    test_scenarios = {
-        "Identity Mass": None,
-        "Diagonal Mass": torch.tensor([0.5, 5.0]), # Values for mass matrix M
-        "Full Mass": torch.tensor([[2.0, 0.8], [0.8, 1.5]]), # M
-        "Batched Diagonal Mass": torch.rand(num_chains, dim) * 2.0 + 0.5, # Batch of M_diags
-        "Batched Full Mass": torch.stack([ # Batch of M
-            A @ A.T + torch.eye(dim) * 1e-2 
-            for A in [torch.randn(dim, dim) for _ in range(num_chains)]
-        ])
-    }
-    
-    # Boundary condition test (optional)
-    # phi_min = torch.tensor([-2.0, -2.0]) 
-    # phi_max = torch.tensor([2.0, 2.0])
-    # common_sampling_params_bc = {**common_sampling_params, "phi_min_norm": phi_min, "phi_max_norm": phi_max}
-
-
-    for name, mass_config in test_scenarios.items():
-        print(f"\n--- Testing with {name} ---")
-        current_params = {**common_sampling_params, "mass_matrix_input": mass_config}
-        if name == "Full Mass" or name == "Batched Full Mass": # May need smaller step for dense mass
-            current_params["step_size"] = 0.1
-
-        q_f, step_f, inv_m_f = sample_hmc_v2(**current_params)
-        print(f"Final q mean ({name}): {q_f.mean(dim=0)}")
-        print(f"Final step_size ({name}): {step_f:.4e}")
-        # print(f"Inv Mass Mat sample ({name}): {inv_m_f if inv_m_f is None else inv_m_f[0] if inv_m_f.ndim > 1 else inv_m_f}")
-
-
-    print("\nAll V2 tests completed!")
+    print("Running HMC V2 example ... ")

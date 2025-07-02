@@ -591,38 +591,94 @@ class ColoredPowerSpectrum2D(nn.Module):
 
 # --- HMC Sampler and Utilities ---
 
-class DualAveragingStepSize:
+# class DualAveragingStepSize:
+#     def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10.0, kappa=0.75):
+#         self.mu = np.log(10 * initial_step_size)
+#         self.log_step = np.log(initial_step_size)
+#         self.h_bar = 0.0 # Initialize to 0
+#         self.log_step_bar = np.log(initial_step_size) # Smoothed log step size
+#         self.t = t0
+#         self.t0 = t0
+
+#         self.target_accept = target_accept
+#         self.gamma = gamma
+#         self.kappa = kappa
+
+#     def update(self, accept_prob):
+#         # Defensive: clamp acceptance probability
+#         accept_prob = np.clip(accept_prob, 0.0, 1.0)
+        
+#         # eta = 1.0 / (self.t + self.t)
+#         eta = 1.0 / (self.t + self.t0)  
+#         self.h_bar = (1 - eta) * self.h_bar + eta * (self.target_accept - accept_prob)
+#         log_step = self.mu - (np.sqrt(self.t) / self.gamma) * self.h_bar
+#         eta_s = self.t ** (-self.kappa)
+#         self.log_step_bar = eta_s * log_step + (1 - eta_s) * self.log_step_bar
+        
+#         self.t += 1.0
+#         return np.exp(log_step) # Return current noisy step size
+
+#     def get_final_step_size(self):
+#         return np.exp(self.log_step_bar)
+    
+    
+class DualAveragingStepSize():
+    """ Dual averaging step size adaptation (Nesterov 2009). """
+
     def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10.0, kappa=0.75):
-        self.mu = np.log(10 * initial_step_size)
-        self.log_step = np.log(initial_step_size)
-        self.h_bar = 0.0 # Initialize to 0
-        self.log_step_bar = np.log(initial_step_size) # Smoothed log step size
-        self.t = t0
-
+        """        
+        Args:
+            initial_step_size (torch.Tensor): Initial step size.
+            target_accept (float, optional): Target Metropolis acceptance rate. Must be between 0 and 1. Defaults to 0.65.
+            gamma (float, optional): Adaptation regularization scale. Defaults to 0.05.
+            t0 (float, optional): Adaptation iteration offset. Defaults to 10.0.
+            kappa (float, optional): Adaptation relaxation exponent. Defaults to 0.75.
+            nadapt (int, optional): _description_. Defaults to 0.    
+        """
+        
+        self.initial_step_size = initial_step_size 
+        self.mu = torch.log(initial_step_size) # proposals are biased upwards to stay away from 0.
         self.target_accept = target_accept
-        self.gamma = gamma
+        self.gamma = gamma * 2 #parameter to tune
+        self.t = t0
         self.kappa = kappa
+        self.error_sum = torch.zeros_like(self.initial_step_size)
+        self.log_averaged_step = torch.zeros_like(self.initial_step_size)
+        
+    def update(self, p_accept):
+        
+        p_accept[p_accept > 1] = 1.
+        p_accept[torch.isnan(p_accept)] = 0.
+        # Running tally of absolute error. Can be positive or negative. Want to be 0.
+        self.error_sum += self.target_accept - p_accept
+        # This is the next proposed (log) step size. Note it is biased towards mu.
+        log_step = self.mu - self.error_sum / (np.sqrt(self.t) * self.gamma)
+        # Forgetting rate. As `t` gets bigger, `eta` gets smaller.
+        eta = self.t ** -self.kappa
+        # Smoothed average step size
+        self.log_averaged_step = eta * log_step + (1 - eta) * self.log_averaged_step
+        # This is a stateful update, so t keeps updating
+        self.t += 1
 
-    def update(self, accept_prob):
-        # Defensive: clamp acceptance probability
-        accept_prob = np.clip(accept_prob, 0.0, 1.0)
-        
-        eta = 1.0 / (self.t + self.t)
-        self.h_bar = (1 - eta) * self.h_bar + eta * (self.target_accept - accept_prob)
-        
-        log_step = self.mu - (np.sqrt(self.t) / self.gamma) * self.h_bar
-        
-        eta_s = self.t ** (-self.kappa)
-        self.log_step_bar = eta_s * log_step + (1 - eta_s) * self.log_step_bar
-        
-        self.t += 1.0
-        return np.exp(log_step) # Return current noisy step size
+        # Return both the noisy step size, and the smoothed step size
+        return torch.exp(log_step)
 
     def get_final_step_size(self):
-        return np.exp(self.log_step_bar)
+        return torch.exp(self.log_averaged_step)
+    
+    
+def reflect_boundary(q, p, p_nxt, phi_min_norm, phi_max_norm):
+    p_ret = p_nxt
+    for i in range(q.shape[-1]):  # phi and sigma
+        crossed_min_boundary = q[..., i] < phi_min_norm[i]
+        crossed_max_boundary = q[..., i] > phi_max_norm[i]
+        p_ret[..., i][crossed_min_boundary] = -p[..., i][crossed_min_boundary]
+        p_ret[..., i][crossed_max_boundary] = -p[..., i][crossed_max_boundary]
+    return p_ret
 
 def leapfrog(q_curr, p_curr, step_size, n_steps, log_grad_fn, inv_mass_matrix,
              q_min_bounds=None, q_max_bounds=None):
+
     q = q_curr.clone()
     p = p_curr.clone()
 
@@ -676,21 +732,23 @@ def leapfrog(q_curr, p_curr, step_size, n_steps, log_grad_fn, inv_mass_matrix,
     
     return q, -p  # Negate momentum for detailed balance
 
-def sample_hmc(log_prob_fn, log_grad_fn, q_init, step_size=0.1, n_leapfrog_steps=10,
+def sample_hmc(log_prob_fn, log_grad_fn, q_init, step_size=0.01, n_leapfrog_steps=10,
                chain_length=500, burnin_steps=250, adapt=True,
                q_min_bounds=None, q_max_bounds=None):
+    
     
     q = q_init.clone()
     # print('q.shape: ', q.shape)
     batch_size, dim = q.shape
     device = q.device
-
+    
     # HMC is simpler with identity mass matrix for this problem
     inv_mass_matrix = torch.eye(dim, device=device)
 
     step_size_adapter = None
     if adapt:
-        step_size_adapter = DualAveragingStepSize(step_size)
+        ## for batch_size wise chaining
+        step_size_adapter = DualAveragingStepSize(step_size * torch.ones((batch_size), device=q.device, dtype=q.dtype))
 
     q_chain = []
     accept_rates = []
@@ -722,10 +780,11 @@ def sample_hmc(log_prob_fn, log_grad_fn, q_init, step_size=0.1, n_leapfrog_steps
         
         # Adapt step size during burn-in
         if adapt and i < burnin_steps:
-            step_size = step_size_adapter.update(accept_prob.mean().item())
+            step_size = step_size_adapter.update(accept_prob)
         elif adapt and i == burnin_steps:
             step_size = step_size_adapter.get_final_step_size()
-            print(f"HMC adaptation finished. Final step size: {step_size:.4e}")
+            p_step_size = step_size.mean().item()
+            print(f"HMC adaptation finished. Final step size: {p_step_size:.4e}")
 
         if i >= burnin_steps:
             q_chain.append(q.clone())
