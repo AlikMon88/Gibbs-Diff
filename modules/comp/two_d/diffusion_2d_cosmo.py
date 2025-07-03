@@ -29,6 +29,7 @@ from ...utils.cosmo_create import *
 
 import matplotlib.pyplot as plt
 import cv2
+import time
 
 CMB_SOURCE_PATH = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
 PARAMS_SOURCE_PATH = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/params'
@@ -57,7 +58,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
 H0_PRIOR_MIN, H0_PRIOR_MAX = 50.0, 90.0
 OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX = 0.0075, 0.0567 # Note: paper uses omega_b, CAMB uses ombh2
 # To convert: omega_b = ombh2 / (H0/100)^2. For priors, it's easier to sample H0 and ombh2 directly.
-SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.2 # sigma_min should be >0. Let's use 0.1 for now.
+SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.35, 1.0 # sigma_min should be >0. Let's use 0.1 for now.
 
 
 class GibbsDiff2D_cosmo(nn.Module):
@@ -74,7 +75,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         hmc_n_leapfrog_steps=5,
         hmc_chain_length=5, # Number of HMC samples per Gibbs iteration
         hmc_burnin_steps=2, # Burn-in for HMC *within* each Gibbs step (usually small or 0 after initial adaptation)
-        hmc_adapt_stepsize_iters = 5 # For initial HMC step size adaptation
+        hmc_adapt_stepsize_iters = 3 # For initial HMC step size adaptation
     ):
         super().__init__()
 
@@ -204,19 +205,6 @@ class GibbsDiff2D_cosmo(nn.Module):
         This is based on your interpretation for starting ancestral sampling.
         """
 
-        # print('sigma_cmb_values: ', sigma_cmb_values.shape)
-
-        # # DDPM noise schedule: sigma_t^2 = beta_t or (1-alpha_bar_t) / alpha_bar_t etc.
-        # ddpm_noise_levels = torch.sqrt((1. - self.alpha_bar_t_ddpm) / self.alpha_bar_t_ddpm).to(self.device) # Shape [num_timesteps_ddpm]
-        
-        # # Expand dims for broadcasting: [1, T_ddpm] vs [B_chains, 1]
-        # diffs = torch.abs(ddpm_noise_levels.unsqueeze(0) - sigma_cmb_values.unsqueeze(1)) # [B_chains, T_ddpm]
-        # closest_ddpm_t_indices = torch.argmin(diffs, dim=1) # [B_chains]
-
-        # return closest_ddpm_t_indices # These are the t_eff to start DDPM from
-        
-        ###################################
-
         alpha_bar_t_ddpm = self.alpha_bar_t_ddpm.to(self.device)
         all_noise_levels = torch.sqrt((1-alpha_bar_t_ddpm)/alpha_bar_t_ddpm).reshape(-1, 1).repeat(1, sigma_cmb_values.shape[0]) #--> (T=#timesteps_cumprod, N=#noise_levels)
         print('Closest-Timestep: ', all_noise_levels.shape, sigma_cmb_values.shape)
@@ -266,12 +254,8 @@ class GibbsDiff2D_cosmo(nn.Module):
             else:
                 ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
                 # print('H0: ', phi_cmb_cond[:, 0], 'ombh2: ', phi_cmb_cond[:, 1])
-                # cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
-                # z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None) ## seed=None for non-deterministic
-                
-                ''' Power-Spectrum Based ''' 
-                z = get_direct_cmb_maps(phi, ps_model, device=None)
-                
+                cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
+                z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None) ## seed=None for non-deterministic
                 z = cv2.resize(np.array(z), self.image_size_hw)
                 z = (z - np.mean(z)) / np.std(z)                
 
@@ -342,10 +326,6 @@ class GibbsDiff2D_cosmo(nn.Module):
         Samples a dust map x_k ~ q(x | y_observed, Phi_CMB_current)
         using DDPM ancestral sampling, starting from an effective t_eff.
         """
-        # y_observed_cmb_corrupted is the "true" observation y = x_dust + eps_CMB
-        # For DDPM, the input z_t should be x_0 + artificial_ddpm_noise.
-        # Here, y_observed_cmb_corrupted *is* effectively our starting point,
-        # considered to be at some t_eff.
         
         sigma_cmb_from_phi = phi_cmb_current_estimate[:, 0] # Extract current sigma_CMB estimate
         phi_ps = phi_cmb_current_estimate[:, 1:]
@@ -422,7 +402,9 @@ class GibbsDiff2D_cosmo(nn.Module):
                             hmc_step_size_initial=0.01, # Initial HMC step size
                             hmc_inv_mass_matrix_initial=None, # Initial HMC inv mass matrix
                             adapt_hmc_during_burnin=True,
-                            return_chains_history=False):
+                            return_chains_history=False,
+                            is_debug=False,
+                            sup_residual=None):
         """
         Runs the Gibbs sampler for the cosmology problem.
         y_observed: The input mixed map (dust + CMB). Shape [B_orig, C, H, W]
@@ -459,6 +441,11 @@ class GibbsDiff2D_cosmo(nn.Module):
         phi_cmb_history = []
         x_dust_history = []
         
+        print('Initial-Params: ', phi_cmb_current)
+        
+        ## Min-Max Scaling
+        phi_cmb_current = normalize_phi_cmb(phi_cmb_current)
+        
         # HMC parameters (will be adapted if adapt_hmc_during_burnin is True)
         current_hmc_step_size = hmc_step_size_initial
         current_hmc_inv_mass_matrix = hmc_inv_mass_matrix_initial
@@ -469,17 +456,23 @@ class GibbsDiff2D_cosmo(nn.Module):
 
 
         for gibbs_iter in tqdm(range(n_it_gibbs + n_it_burnin_gibbs), desc="Gibbs Iterations"):
+            
             # --- Step 1: Sample Dust Map x_k ~ q(x | y, Phi_CMB_{k-1}) ---
             # This uses the DDPM ancestral sampling starting from t_eff based on sigma_CMB
-            # The y_repeated is the observation.
-            sampled_x_dust = self.sample_dust_posterior(
-                y_observed_cmb_corrupted=y_repeated,
-                phi_cmb_current_estimate=phi_cmb_current
-            ) # Returns [B_total, C, H, W]
+            ft = time.time()
+            if is_debug and sup_residual is not None:
+                # print(' --- Bypassing - (DDPM) ---')
+                estimated_cmb_residual = sup_residual
+                var_eps = torch.mean(torch.var(estimated_cmb_residual, dim=-1))
+                sampled_x_dust = y_repeated - estimated_cmb_residual
+                
+            else: 
+                sampled_x_dust = self.sample_dust_posterior(y_observed_cmb_corrupted=y_repeated, phi_cmb_current_estimate=phi_cmb_current) # Returns [B_total, C, H, W]
+                estimated_cmb_residual = y_repeated - sampled_x_dust # [B_total, C, H, W]
 
-            # --- Step 2: Estimate CMB residual epsilon_{k-1} = y - x_k ---
-            estimated_cmb_residual = y_repeated - sampled_x_dust # [B_total, C, H, W]
-
+            lt = time.time()
+            # print('time-taken (SAMPLING): ', (lt - ft) / 60, ' mins')
+            
             # --- Step 3: Sample Phi_CMB_k ~ q(Phi | epsilon_{k-1}) using HMC ---
             def hmc_log_posterior_fn(phi_cmb_trial): # phi_cmb_trial is [B_total, 2]
                 log_p = log_prior_phi_cmb(phi_cmb_trial, (phi_min_bounds, phi_max_bounds))
@@ -508,34 +501,12 @@ class GibbsDiff2D_cosmo(nn.Module):
                 phi_cmb_clone = phi_cmb_trial_grad.clone().requires_grad_(True)
                 logp_val = hmc_log_posterior_fn(phi_cmb_clone)
                 
-                # Sum is needed if logp_val is not scalar per batch item, but it should be.
-                # Handle -inf by setting grad to 0 for those, or use a large negative number.
                 valid_grads_mask = ~torch.isinf(logp_val)
                 grad_phi = torch.zeros_like(phi_cmb_clone)
 
                 if torch.any(valid_grads_mask):
-                    # Compute gradients only for valid logp values
-                    # Need to sum valid logp values to get a scalar for autograd, then un-sum grads.
-                    # This is tricky for batched autograd if logp_val is not all valid.
-                    # A common way is to compute grads for each item if autograd over batch is problematic.
-                    # For now, assume autograd handles batching correctly or sum and scale.
-                    
-                    # Simpler: if any logp_val is -inf, the gradient for that chain is effectively zero for other params
-                    # or should be handled by boundary conditions in HMC. Let's try direct grad.
-                    # If logp_val contains -inf, autograd might error or give NaNs.
-                    # We should ensure inputs to log_likelihood are only for valid priors.
-                    
-                    # This is a common pain point with HMC and hard boundaries.
-                    # The log_posterior_fn already returns -inf.
-                    # HMC should ideally handle this by rejecting steps outside bounds.
-                    
                     # Compute grad only for elements where logp_val is finite
                     if torch.any(valid_grads_mask):
-                        # This is the tricky part with batched autograd and conditional computation.
-                        # One way: loop (inefficient) or use more advanced autograd tricks.
-                        # For now, let's assume our HMC handles boundary rejections.
-                        # The HMC log_prob_fn will return -inf for out-of-bounds, leading to rejection.
-                        # The gradient is only "needed" for points where log_prob is finite.
                         grad_phi[valid_grads_mask] = torch.autograd.grad(
                             outputs=logp_val[valid_grads_mask].sum(), # Sum to make scalar for grad
                             inputs=phi_cmb_clone, # Grad w.r.t. all inputs
@@ -553,9 +524,7 @@ class GibbsDiff2D_cosmo(nn.Module):
                  current_n_adapt_hmc = self.hmc_adapt_stepsize_iters // n_it_burnin_gibbs # Distribute adaptation
                  if gibbs_iter == 0: current_n_adapt_hmc = self.hmc_adapt_stepsize_iters # Full adapt on first iter
 
-            # Run HMC (using your sample_hmc_v2 or similar)
-            # We need to ensure sample_hmc_v2 can take batched phi_init, step_size, inv_mass_matrix
-            # and that log_prob_fn and log_grad handle batches.
+            ft = time.time()
             phi_cmb_new, hmc_step_size_new, hmc_inv_mass_new, _ = sample_hmc_cosmo(
                 log_prob_fn=hmc_log_posterior_fn,
                 log_grad_fn=hmc_gradient_log_posterior_fn,
@@ -571,6 +540,8 @@ class GibbsDiff2D_cosmo(nn.Module):
                 phi_min_bounds=phi_min_bounds, # Pass bounds to HMC
                 phi_max_bounds=phi_max_bounds
             )
+            lt = time.time()
+            # print('time-taken (HMC): ', (lt - ft)/60, ' mins')
             
             ''' Posterior-Distribution Problem'''
             # # sample_hmc_v2 returns the last sample.
@@ -608,15 +579,19 @@ class GibbsDiff2D_cosmo(nn.Module):
         x_dust_out = torch.stack(x_dust_history, dim=2).detach().cpu()   # [B_orig, N_chains, N_gibbs_samples, C,H,W]
 
         if return_chains_history:
-            return phi_cmb_out, x_dust_out
+            phi_cmb_history_denorm = unnormalize_phi_cmb(phi_cmb_out) 
+            return phi_cmb_history_denorm, x_dust_out
         else:
             # Return the mean of the chains after burn-in (posterior mean estimate)
-            return phi_cmb_out.mean(dim=(1,2)), x_dust_out.mean(dim=(1,2))
+            phi_cmb_out = phi_cmb_out.mean(dim=(1,2))
+            phi_cmb_history_denorm = unnormalize_phi_cmb(phi_cmb_out)
+            return phi_cmb_history_denorm, x_dust_out.mean(dim=(1,2))
 
 
     def blind_posterior_mean(self, y_observed, num_chains_per_gibbs_sample=5,
                                    n_it_gibbs=10, n_it_burnin_gibbs=5,
-                                   return_full_posterior_chains=False, avg_pmean=2, **hmc_kwargs):
+                                   return_full_posterior_chains=False, avg_pmean=2, 
+                                   is_debug=False, sup_residual=None, **hmc_kwargs):
         """
         Performs blind denoising for cosmology to get posterior mean estimates.
         y_observed: [B, C, H, W]
@@ -627,6 +602,8 @@ class GibbsDiff2D_cosmo(nn.Module):
             n_it_gibbs=n_it_gibbs,
             n_it_burnin_gibbs=n_it_burnin_gibbs,
             return_chains_history=True, # Get all history for averaging
+            is_debug=True, 
+            sup_residual=eps
             **hmc_kwargs
         )
         # phi_chains: [B, N_chains_gibbs, N_gibbs_samples, 3] -> [N_chains_gibbs, B, avg_pmean, 3]

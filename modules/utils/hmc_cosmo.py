@@ -7,24 +7,9 @@ from pixell import enmap # For lmap and FFT operations
 import camb # For CMB power spectra
 # from tqdm.auto import tqdm # Optional for HMC progress if long chains
 
-# --- Global Configurations for Cosmology (User MUST define these elsewhere and pass them) ---
-# These are placeholders. Define them in your main script where you use these utils.
-# NPIX_SIDE_COSMO = 64
-# SHAPE_COSMO_MAP = (NPIX_SIDE_COSMO, NPIX_SIDE_COSMO) # Spatial shape for lmap
-# WCS_COSMO_MAP = None # Must be a valid enmap WCS object
-# LMAX_CAMB_COSMO = int(1.5 * NPIX_SIDE_COSMO)
-# FIDUCIAL_COSMO_PARAMS_DICT = {
-#     'omch2': 0.120, 'omk': 0.0, 'tau': 0.054,
-#     'As': 2.1e-9, 'ns': 0.965
-# }
-# PRIOR_BOUNDS_PHI_CMB_TUPLE = ( # (mins_tensor, maxs_tensor)
-#     torch.tensor([0.5, 60.0, 0.020]), # sigma_min, h0_min, ombh2_min
-#     torch.tensor([1.5, 80.0, 0.025])  # sigma_max, h0_max, ombh2_max
-# )
-# --- End Global Configurations Placeholder ---
 
 sigma_eps = 1e-6 # Unused in this snippet, but kept from original
-sigma_min, sigma_max = 0.04, 0.4
+# sigma_min, sigma_max = 0.04, 0.4
 
 OMCH2_FID = 0.122 # Cold dark matter density omega_c * h^2
 OMK_FID = 0.0    # Omega_k
@@ -35,7 +20,7 @@ AS_FID = 2.1e-9  # Scalar amplitude (ln(10^10 As) = 3.044 => As ~ 2.1e-9)
 H0_PRIOR_MIN, H0_PRIOR_MAX = 50.0, 90.0
 OMBH2_PRIOR_MIN, OMBH2_PRIOR_MAX = 0.0075, 0.0567 # Note: paper uses omega_b, CAMB uses ombh2
 # To convert: omega_b = ombh2 / (H0/100)^2. For priors, it's easier to sample H0 and ombh2 directly.
-SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.1, 1.0 # sigma_min should be >0. Let's use 0.1 for now.
+SIGMA_CMB_PRIOR_MIN, SIGMA_CMB_PRIOR_MAX = 0.35, 1.0 # sigma_min should be >0. Let's use 0.1 for now.
 
 
 # --- Caching ---
@@ -43,8 +28,8 @@ _camb_cls_cache = {}
 _lmap_cache_cosmo = {}
 
 
-physical_mins = torch.tensor([SIGMA_MIN, H0_MIN, OMBH2_MIN])
-physical_maxs = torch.tensor([SIGMA_MAX, H0_MAX, OMBH2_MAX])
+physical_mins = torch.tensor([SIGMA_CMB_PRIOR_MIN, H0_PRIOR_MIN, OMBH2_PRIOR_MIN])
+physical_maxs = torch.tensor([SIGMA_CMB_PRIOR_MAX, H0_PRIOR_MAX, OMBH2_PRIOR_MAX])
 
 def normalize_phi_cmb(phi_physical, mins=physical_mins, maxs=physical_maxs):
     """Maps a physical Phi_CMB vector to the internal [0, 1] range."""
@@ -53,7 +38,18 @@ def normalize_phi_cmb(phi_physical, mins=physical_mins, maxs=physical_maxs):
 
 def unnormalize_phi_cmb(phi_normalized, mins=physical_mins, maxs=physical_maxs):
     """Maps an internal [0, 1] vector back to its physical range."""
+    
+    mins = mins.reshape(1, -1)  # (1, 3)
+    maxs = maxs.reshape(1, -1)  # (1, 3)
+
+    # Move to same device
     mins, maxs = mins.to(phi_normalized.device), maxs.to(phi_normalized.device)
+
+    if phi_normalized.ndim == 4:
+        # Expand to match (B, C, T, 3)
+        mins = mins[None, None, None, :]  # (1, 1, 1, 3)
+        maxs = maxs[None, None, None, :]  # (1, 1, 1, 3)
+
     return phi_normalized * (maxs - mins) + mins
 
 # --- Cosmology Specific Likelihood & Prior ---
@@ -64,12 +60,8 @@ def get_cosmo_lmap(shape_hw, wcs, device='cpu'): # shape_hw is (H,W)
     A more robust key might be needed if WCS varies subtly for the same shape.
     For many use cases, shape and a simple WCS descriptor are enough.
     """
-    # Try to create a somewhat unique key from WCS properties that affect lmap
-    # This is still a heuristic. The best is to precompute lmap once if WCS is fixed for a shape.
+    
     if wcs is not None:
-        # Extract some key WCS parameters that define the geometry for lmap
-        # CRVAL might not always be present or consistently named for all projections
-        # Using CD matrix (or CDELT) and CRPIX is more fundamental
         try:
             cd_flat = tuple(wcs.wcs.cd.flatten()) if hasattr(wcs, 'wcs') and hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None else tuple(wcs.wcs.cdelt)
             crpix_flat = tuple(wcs.wcs.crpix)
@@ -354,12 +346,12 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
                      phi_init, # Initial q (Phi_CMB) [B_chains, D_phi]
                      mass_matrix_M_input=None, # Mass matrix M [B_chains, D_phi, D_phi] or [D_phi,D_phi] or [D_phi] or None
                      step_size_initial=0.01, # scalar
-                     n_leapfrog_steps=5, # int or tuple for random range
-                     num_samples_chain=1, # samples to return per chain (after burn-in)
-                     num_burnin_steps_hmc=2, # HMC's own burn-in for adaptation
+                     n_leapfrog_steps=15, # int or tuple for random range
+                     num_samples_chain=30, # samples to return per chain (after burn-in)
+                     num_burnin_steps_hmc=15, # HMC's own burn-in for adaptation
                      adapt_step_size=True,
                      adapt_mass_matrix=False, # Whether to adapt M during HMC burn-in
-                     num_adapt_steps_total=50, # Total steps for adaptation phase
+                     num_adapt_steps_total=18, # Total steps for adaptation phase
                      phi_min_bounds=None, 
                      phi_max_bounds=None, # Tensors [D_phi]
                      verbose=False):
