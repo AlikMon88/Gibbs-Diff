@@ -66,7 +66,7 @@ class GibbsDiff2D(nn.Module):
         hmc_chain_length = 30,
         hmc_n_leapfrog_steps = 20,
         hmc_burnin_steps = 15,
-        hmc_adapt_stepsize_iters = 5,
+        hmc_adapt_stepsize_iters = 12,
         sampling_timesteps=None):
 
         super().__init__()
@@ -198,7 +198,7 @@ class GibbsDiff2D(nn.Module):
         ## HMC-Sampler
         if sampler_v2:
             hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc_v2(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.hmc_n_leapfrog_steps, chain_length=self.hmc_chain_length, burnin_steps=self.hmc_burnin_steps, \
-            adapt=adapt, inv_mass_matrix=inv_mass_matrix, phi_min_norm=phi_all_min, phi_max_norm=phi_all_max) 
+            adapt=adapt, n_adapt=self.hmc_adapt_stepsize_iters, inv_mass_matrix=inv_mass_matrix, phi_min_norm=phi_all_min, phi_max_norm=phi_all_max) 
 
         else:
             hmc_prefill = lambda log_prob_fn, log_grad, phi_init, step_size, inv_mass_matrix, adapt: sample_hmc(log_prob_fn, log_grad, phi_init, step_size=step_size, n_leapfrog_steps=self.hmc_n_leapfrog_steps, chain_length=self.hmc_chain_length, burnin_steps=self.hmc_burnin_steps, \

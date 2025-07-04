@@ -590,37 +590,6 @@ class ColoredPowerSpectrum2D(nn.Module):
 
 
 # --- HMC Sampler and Utilities ---
-
-# class DualAveragingStepSize:
-#     def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10.0, kappa=0.75):
-#         self.mu = np.log(10 * initial_step_size)
-#         self.log_step = np.log(initial_step_size)
-#         self.h_bar = 0.0 # Initialize to 0
-#         self.log_step_bar = np.log(initial_step_size) # Smoothed log step size
-#         self.t = t0
-#         self.t0 = t0
-
-#         self.target_accept = target_accept
-#         self.gamma = gamma
-#         self.kappa = kappa
-
-#     def update(self, accept_prob):
-#         # Defensive: clamp acceptance probability
-#         accept_prob = np.clip(accept_prob, 0.0, 1.0)
-        
-#         # eta = 1.0 / (self.t + self.t)
-#         eta = 1.0 / (self.t + self.t0)  
-#         self.h_bar = (1 - eta) * self.h_bar + eta * (self.target_accept - accept_prob)
-#         log_step = self.mu - (np.sqrt(self.t) / self.gamma) * self.h_bar
-#         eta_s = self.t ** (-self.kappa)
-#         self.log_step_bar = eta_s * log_step + (1 - eta_s) * self.log_step_bar
-        
-#         self.t += 1.0
-#         return np.exp(log_step) # Return current noisy step size
-
-#     def get_final_step_size(self):
-#         return np.exp(self.log_step_bar)
-    
     
 class DualAveragingStepSize():
     """ Dual averaging step size adaptation (Nesterov 2009). """

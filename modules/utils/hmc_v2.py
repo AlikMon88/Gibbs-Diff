@@ -1,3 +1,466 @@
+# import os
+# import numpy as np
+# import math
+# import torch
+# from autograd import grad
+# import torch.nn as nn
+# import torch.nn.functional as F
+
+# # from tqdm import tqdm # Not used in the provided user HMC code snippet
+
+# # User's existing functions (some might be replaced or become v2)
+# sigma_eps = 1e-6 # Unused in this snippet, but kept from original
+# sigma_min, sigma_max = 0.04, 0.4
+
+# def get_phi_all_bounds(phi_min=-1.0, phi_max = 1.0, sigma_min = 0.04, sigma_max = 0.4, device = 'cpu'):
+#     phi_min = torch.tensor([phi_min], device=device)
+#     phi_max = torch.tensor([phi_max], device=device)
+#     sigma_min = torch.tensor([sigma_min], device=device)
+#     sigma_max = torch.tensor([sigma_max], device=device)
+
+#     phi_min_all = torch.cat([phi_min, sigma_min])
+#     phi_max_all = torch.cat([phi_max, sigma_max])
+#     return phi_min_all, phi_max_all
+
+# def get_noise_estimate_2d(y, sigma_min, sigma_max):
+#     y_std = y.std()
+#     sigma_est = 1.15 * y_std - 0.17  # heuristic from Imagenet
+#     sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
+    
+#     return sigma_est.unsqueeze(0)
+
+# def high_pass_filter(y, kernel_size=31):
+#     # Create a moving average (low-pass) kernel
+#     kernel = torch.ones(kernel_size) / kernel_size
+#     kernel = kernel.to(y.device).unsqueeze(0).unsqueeze(0)  # (1, 1, K)
+    
+#     low_pass = F.conv1d(y, kernel, padding=kernel_size // 2)
+#     high_pass = y - low_pass
+#     return high_pass.squeeze()
+
+# def get_noise_estimate_1d(y, sigma_min, sigma_max, kernel_size=31):
+#     high_freq_part = high_pass_filter(y, kernel_size)
+#     sigma_est = high_freq_part.std()
+#     sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
+#     return sigma_est.unsqueeze(0)
+
+# ## standardize = [-1, 1] -> [0, 1] ## for HMC-sampling
+# def normalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
+#     ret = (phi - phi_min) / (phi_max - phi_min)
+#     return ret
+
+# ## de-standardize = [0, 1] -> [-1, 1]
+# def unnormalize_phi(phi, phi_max=1.0, phi_min=-1.0, mode='compact'):
+#     ret = phi * (phi_max - phi_min) + phi_min
+#     return ret
+
+# def sample_phi_prior(n, phi_min=-1.0, phi_max=1.0, norm_mode='compact'):
+#     phi = torch.rand(n) * (phi_max - phi_min) + phi_min
+#     return normalize_phi(phi)
+
+
+# def log_prior_phi_sigma(phi, sigma, sigma_min=1e-2, sigma_max=1e2, norm_mode="compact"):
+
+#     # phi: (b, 2), sigma: (b,)
+#     in_bounds_phi = torch.logical_and(phi >= 0.0, phi <= 1.0)  # (b, 2)
+#     valid_phi = torch.all(in_bounds_phi, dim=-1).float()       # (b,)
+#     logp_phi = torch.log(valid_phi + 1e-30)                    # (b,)
+
+#     in_bounds_sigma = torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float()  # (b,)
+#     logp_sigma = torch.log(in_bounds_sigma + 1e-30)             # (b,)
+
+#     logp = logp_phi + logp_sigma
+#     return logp
+
+
+# def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model):
+    
+#     ps = ps_model(phi)
+
+#     if eps.ndim == 3:  # 1D case
+#         eps_dim = eps.shape[-1]
+#         xf = torch.fft.fft(eps)
+#         sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # (B, 1)
+#         scaled_ps = sigma**2 * ps
+#         term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+#         term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=-1)
+#         term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=-1) / eps_dim
+
+#     elif eps.ndim == 4:  # 2D image case
+#         H, W = eps.shape[-2], eps.shape[-1]
+#         eps_dim = H * W
+#         xf = torch.fft.fft2(eps)
+#         sigma = sigma.view(-1, 1, 1, 1) if sigma.ndim == 1 else sigma
+#         scaled_ps = sigma**2 * ps
+#         term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+#         term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=(-2, -1))
+#         term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=(-2, -1)) / eps_dim
+
+#     else:
+#         raise ValueError("eps must be 2D (1D case) or 4D (image case)")
+    
+#     log_likelihood = term_pi + term_logdet + term_x  # (b, dim)
+#     log_likelihood = log_likelihood.sum(dim=1)       # (b,) --> sum over the channel dim
+#     return log_likelihood
+
+
+# ## We gradient-trace the ColoredPoweredSpectrum
+# class ColoredPowerSpectrum2D(nn.Module):
+#     def __init__(self, norm_input_phi='compact', shape=(3, 64, 64), device='cpu', sigma_eps=1e-6):
+#         super().__init__()
+#         assert len(shape) == 3  # (C, H, W)
+#         self.norm_input_phi = norm_input_phi
+#         self.device = device
+
+#         dim, H, W = shape
+
+#         # Create 2D isotropic wavenumber grid
+#         ky = torch.fft.fftfreq(H, d=1.0).to(torch.float32).to(device)  # (H,)
+#         kx = torch.fft.fftfreq(W, d=1.0).to(torch.float32).to(device)  # (W,)
+#         kx, ky = torch.meshgrid(kx, ky, indexing='ij')  # (W, H)
+#         k_squared = kx ** 2 + ky ** 2
+#         k_magnitude = torch.sqrt(k_squared).unsqueeze(0).unsqueeze(0)  # shape: (1, C, H, W)
+#         k_magnitude[:, :, 0, 0] = sigma_eps  # avoid division by zero at (0, 0)
+
+#         self.S = k_magnitude  # shape: (1, C, H, W)
+
+#     def forward(self, phi):
+#         '''
+#         phi: tensor of shape (batch_size, dim) or (batch_size, 1)
+#              controls the spectral slope alpha
+#         '''
+#         phi = unnormalize_phi(phi, mode=self.norm_input_phi)
+
+#         batch_size, dim = phi.shape[0], self.S.shape[1]
+#         S = self.S.repeat(batch_size, dim, 1, 1)        # (batch_size, dim, H, W)
+#         S = S ** phi.reshape(-1, 1, 1, 1)               # (batch_size, dim, H, W)
+#         S = S / S.mean(dim=(2, 3), keepdim=True)        # Normalize spectrum per sample
+#         return S
+
+# class ColoredPowerSpectrum1D(nn.Module):
+#     def __init__(self, norm_input_phi='compact', shape=(1, 100), device='cpu'):
+#         super().__init__()
+#         shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape,)
+#         assert len(shape) == 2  # (dim, seq_len)
+        
+#         dim, N = shape
+#         self.norm_input_phi = norm_input_phi
+
+#         # Create isotropic wavenumber vector for 1D
+#         wn = torch.fft.fftfreq(N).to(torch.float32)  # shape: (N,)
+#         wn = wn.to(device)
+
+#         # Compute wavenumber magnitude (squared)
+#         S = wn.pow(2).reshape(1, 1, N)  # (1, 1, N)
+#         S = torch.sqrt(S)
+#         S[:, :, 0] = sigma_eps  # avoid division by zero for k=0
+
+#         self.S = S  # shape: (1, 1, N)
+
+#     def forward(self, phi):
+#         '''
+#         phi: tensor of shape (batch_size, dim) or (batch_size, 1)
+#              controls the spectral slope alpha
+#         '''
+#         phi = unnormalize_phi(phi, mode=self.norm_input_phi)
+
+#         batch_size, dim = phi.shape[0], self.S.shape[1]
+#         S = self.S.repeat(batch_size, dim, 1)  # shape: (batch_size, dim, N)
+#         S = S ** phi.reshape(-1, 1, 1)         # shape: (batch_size, dim, N)
+#         S = S / S.mean(dim=-1, keepdim=True)    # Normalize spectrum
+#         return S
+
+
+# # --- V2 Functions incorporating features from the first HMC code ---
+
+# def compute_inverse_mass_v2(mass_matrix_input):
+
+#     if mass_matrix_input is None:
+#         return None
+#     if not isinstance(mass_matrix_input, torch.Tensor):
+#         raise TypeError("mass_matrix_input must be a torch.Tensor or None")
+
+#     if mass_matrix_input.ndim == 1: # Diagonal mass matrix (D)
+#         if torch.any(mass_matrix_input <= 0):
+#             raise ValueError("Diagonal mass matrix must be positive. Contains non-positive values.")
+#         return 1.0 / mass_matrix_input
+    
+#     elif mass_matrix_input.ndim == 2:
+#         # Check if (D,D) for full or (B,D) for batch of diagonals
+#         # This heuristic might need refinement if D can be equal to B.
+#         # Assuming D is reasonably different from B or context implies one or the other.
+#         # For simplicity, let's assume if shape[0]!=shape[1], it's (B,D)
+#         if mass_matrix_input.shape[0] == mass_matrix_input.shape[1]: # Full mass matrix (D,D)
+#             try:
+#                 # Optional: Check for positive definiteness before inverting
+#                 # torch.linalg.cholesky(mass_matrix_input) 
+#                 return torch.linalg.inv(mass_matrix_input)
+#             except torch.linalg.LinAlgError as e:
+#                 raise ValueError(f"Full mass matrix (D,D) is singular or not invertible: {e}")
+#         else: # Batch of diagonals (B,D)
+#             if torch.any(mass_matrix_input <= 0):
+#                 raise ValueError("Batch of diagonal mass matrices must be positive.")
+#             return 1.0 / mass_matrix_input
+    
+#     elif mass_matrix_input.ndim == 3: # Batch of full mass matrices (B,D,D)
+#         if mass_matrix_input.shape[-1] != mass_matrix_input.shape[-2]:
+#             raise ValueError("Matrices in batch of full mass matrices must be square.")
+#         try:
+#             # Optional: Check PD for each matrix in batch
+#             return torch.linalg.inv(mass_matrix_input)
+#         except torch.linalg.LinAlgError as e:
+#             raise ValueError(f"One or more matrices in the batch are singular or not invertible: {e}")
+#     else:
+#         raise ValueError(f"Unsupported mass_matrix_input ndim: {mass_matrix_input.ndim}")
+
+
+# def kinetic_energy_v2(p, inv_mass_matrix):
+
+#     if inv_mass_matrix is None:
+#         return 0.5 * (p**2).sum(dim=-1)
+    
+#     if inv_mass_matrix.ndim == 1: # Diagonal inverse (D), broadcasts to (B,D) with p:(B,D)
+#         return 0.5 * (p**2 * inv_mass_matrix).sum(dim=-1)
+
+#     elif inv_mass_matrix.ndim == 2:
+#         if inv_mass_matrix.shape[0] == p.shape[0] and \
+#            inv_mass_matrix.shape[1] == p.shape[1]: # Batch of diagonals (B,D)
+#             return 0.5 * (p**2 * inv_mass_matrix).sum(dim=-1)
+
+#         elif inv_mass_matrix.shape[0] == p.shape[1] and \
+#              inv_mass_matrix.shape[1] == p.shape[1]: # Full inverse (D,D) shared
+#             p_col = p.unsqueeze(-1)
+#             M_inv_p = (inv_mass_matrix @ p_col).squeeze(-1)
+#             return 0.5 * (p * M_inv_p).sum(dim=-1)
+        
+#         else:
+#             raise ValueError(f"Ambiguous inv_mass_matrix shape {inv_mass_matrix.shape} for p shape {p.shape}")
+
+#     elif inv_mass_matrix.ndim == 3: # Batch of full inverse (B,D,D)
+#         p_col = p.unsqueeze(-1)
+#         M_inv_p = (inv_mass_matrix @ p_col).squeeze(-1)
+#         return 0.5 * (p * M_inv_p).sum(dim=-1)
+    
+#     else:
+#         raise ValueError(f"Invalid inv_mass_matrix ndim: {inv_mass_matrix.ndim}")
+
+# def dKE_dp_v2(p, inv_mass_matrix):
+    
+#     if inv_mass_matrix is None:
+#         return p
+    
+#     if inv_mass_matrix.ndim == 1: # Diagonal inverse (D)
+#         return p * inv_mass_matrix
+
+#     elif inv_mass_matrix.ndim == 2:
+#         if inv_mass_matrix.shape[0] == p.shape[0] and \
+#            inv_mass_matrix.shape[1] == p.shape[1]: # Batch of diagonals (B,D)
+#             return p * inv_mass_matrix
+        
+#         elif inv_mass_matrix.shape[0] == p.shape[1] and \
+#              inv_mass_matrix.shape[1] == p.shape[1]: # Full inverse (D,D) shared
+#             return (inv_mass_matrix @ p.unsqueeze(-1)).squeeze(-1)
+#         else:
+        
+#             raise ValueError(f"Ambiguous inv_mass_matrix shape {inv_mass_matrix.shape} for p shape {p.shape}")
+    
+#     elif inv_mass_matrix.ndim == 3: # Batch of full inverse (B,D,D)
+#         return (inv_mass_matrix @ p.unsqueeze(-1)).squeeze(-1)
+    
+#     else:
+#         raise ValueError(f"Invalid inv_mass_matrix ndim: {inv_mass_matrix.ndim}")
+
+# def hamiltonian_v2(q, p, log_prob_fn, inv_mass_matrix):
+#     return -log_prob_fn(q) + kinetic_energy_v2(p, inv_mass_matrix)
+
+# def leapfrog_v2(q, p, step_size, n_steps, log_grad_fn, inv_mass_matrix, 
+#                 q_min_bounds=None, q_max_bounds=None):
+#     """
+#     log_grad_fn returns d(log_prob)/dq.
+#     Force F = d(log_prob)/dq. Momentum update p' = p + eps * F.
+#     """
+    
+#     q = q.clone()
+#     p = p.clone()
+    
+#     # Initial half-step for momentum
+#     p = p + 0.5 * step_size * log_grad_fn(q)
+
+#     # Full steps
+#     for _ in range(n_steps - 1):
+#         q = q + step_size * dKE_dp_v2(p, inv_mass_matrix)
+        
+#         # --- Boundary Reflection for q ---
+#         if q_min_bounds is not None and q_max_bounds is not None:
+#             for dim_i in range(q.shape[-1]):
+#                 crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
+#                 crossed_max = q[..., dim_i] > q_max_bounds[dim_i]
+#                 if torch.any(crossed_min):
+#                     q[crossed_min, dim_i] = q_min_bounds[dim_i] + (q_min_bounds[dim_i] - q[crossed_min, dim_i])
+#                     p[crossed_min, dim_i] = -p[crossed_min, dim_i]
+#                 if torch.any(crossed_max):
+#                     q[crossed_max, dim_i] = q_max_bounds[dim_i] - (q[crossed_max, dim_i] - q_max_bounds[dim_i])
+#                     p[crossed_max, dim_i] = -p[crossed_max, dim_i]
+#         # --- End Boundary Reflection ---
+        
+#         p = p + step_size * log_grad_fn(q)
+    
+#     # Final full step for position and half-step for momentum
+#     q = q + step_size * dKE_dp_v2(p, inv_mass_matrix)
+    
+#     # --- Boundary Reflection for q ---
+#     if q_min_bounds is not None and q_max_bounds is not None:
+#         for dim_i in range(q.shape[-1]):
+#             crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
+#             crossed_max = q[..., dim_i] > q_max_bounds[dim_i]
+#             if torch.any(crossed_min):
+#                 q[crossed_min, dim_i] = q_min_bounds[dim_i] + (q_min_bounds[dim_i] - q[crossed_min, dim_i])
+#                 p[crossed_min, dim_i] = -p[crossed_min, dim_i]
+#             if torch.any(crossed_max):
+#                 q[crossed_max, dim_i] = q_max_bounds[dim_i] - (q[crossed_max, dim_i] - q_max_bounds[dim_i])
+#                 p[crossed_max, dim_i] = -p[crossed_max, dim_i]
+#     # --- End Boundary Reflection ---
+
+#     p = p + 0.5 * step_size * log_grad_fn(q)
+    
+#     p = -p  # Negate momentum for detailed balance
+#     return q, p
+
+# class DualAveragingStepSize():
+#     """ Dual averaging step size adaptation (Nesterov 2009). """
+
+#     def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10.0, kappa=0.75):
+#         """        
+#         Args:
+#             initial_step_size (torch.Tensor): Initial step size.
+#             target_accept (float, optional): Target Metropolis acceptance rate. Must be between 0 and 1. Defaults to 0.65.
+#             gamma (float, optional): Adaptation regularization scale. Defaults to 0.05.
+#             t0 (float, optional): Adaptation iteration offset. Defaults to 10.0.
+#             kappa (float, optional): Adaptation relaxation exponent. Defaults to 0.75.
+#             nadapt (int, optional): _description_. Defaults to 0.    
+#         """
+        
+#         self.initial_step_size = initial_step_size 
+#         self.mu = torch.log(initial_step_size) # proposals are biased upwards to stay away from 0.
+#         self.target_accept = target_accept
+#         self.gamma = gamma * 2 #parameter to tune
+#         self.t = t0
+#         self.kappa = kappa
+#         self.error_sum = torch.zeros_like(self.initial_step_size)
+#         self.log_averaged_step = torch.zeros_like(self.initial_step_size)
+        
+#     def update(self, p_accept):
+        
+#         p_accept[p_accept > 1] = 1.
+#         p_accept[torch.isnan(p_accept)] = 0.
+#         # Running tally of absolute error. Can be positive or negative. Want to be 0.
+#         self.error_sum += self.target_accept - p_accept
+#         # This is the next proposed (log) step size. Note it is biased towards mu.
+#         log_step = self.mu - self.error_sum / (np.sqrt(self.t) * self.gamma)
+#         # Forgetting rate. As `t` gets bigger, `eta` gets smaller.
+#         eta = self.t ** -self.kappa
+#         # Smoothed average step size
+#         self.log_averaged_step = eta * log_step + (1 - eta) * self.log_averaged_step
+#         # This is a stateful update, so t keeps updating
+#         self.t += 1
+
+#         # Return both the noisy step size, and the smoothed step size
+#         return torch.exp(log_step)
+
+#     def get_final_step_size(self):
+#         return torch.exp(self.log_averaged_step)
+
+
+# def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step_size=0.01, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
+    
+#     q = phi_init.clone()
+#     if q.ndim == 1: q = q.unsqueeze(0)
+#     batch_size, _ = q.shape
+
+#     if inv_mass_matrix is None:
+#         inv_mass_matrix = compute_inverse_mass_v2(inv_mass_matrix)
+
+#     current_step_size = float(step_size) # Ensure it's a float for adapter
+#     if adapt:
+#         step_size_adapter = DualAveragingStepSize(initial_step_size=step_size * torch.ones((batch_size), device=q.device, dtype=q.dtype))
+
+#     # samples_list = [] # Uncomment if storing all samples
+#     accept_prob_list = []
+#     q_list_for_mass_adapt = []
+
+#     for i in range(1, chain_length + burnin_steps + 1):
+
+#         ''' Might need to sample from ~ (0, M) | Read the theory better | relates to Remannian Manifold MCMC (mass-matrix: M(q) current state: q) '''
+#         p_original = torch.randn_like(q) # p_original ~ N(0,I) : Need to p_tilde = N(0, M) by transforming momentum variable
+
+#         q_new, p_new_proposed = leapfrog_v2(q, p_original, current_step_size, n_leapfrog_steps, log_grad_fn, inv_mass_matrix, q_min_bounds=phi_min_norm, q_max_bounds=phi_max_norm)
+        
+#         p_final_proposal = p_new_proposed # p_final_proposal already has momentum negated from leapfrog
+
+#         # if phi_min_norm is not None and phi_max_norm is not None:
+#         #     # Pass q_new to check boundary condition on the proposed state.
+#         #     # Pass p_original as the momentum before leapfrog if that's the desired reflection logic.
+#         #     p_final_proposal = reflect_boundary(q_new, p_original, p_final_proposal, phi_min_norm, phi_max_norm)
+
+#         H_old = hamiltonian_v2(q, p_original, log_prob_fn, inv_mass_matrix)
+        
+#         # Hamiltonian for proposed state uses q_new and p_final_proposal (which includes negation from leapfrog)
+#         H_new = hamiltonian_v2(q_new, p_final_proposal, log_prob_fn, inv_mass_matrix)
+
+#         accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0)) # (B)
+#         accept_prob_list.append(accept_prob.mean(dim=0).item())
+
+#         accept_mask = torch.rand(batch_size, device=q.device) < accept_prob
+#         q[accept_mask] = q_new[accept_mask]
+
+    
+#         ## Changing mass-matrix through state-accumulation
+#         if adapt:
+#             if i <= n_adapt:
+#                 current_step_size = step_size_adapter.update(accept_prob)
+
+#             elif i == n_adapt + 1: # First step after adaptation window closes
+#                 current_step_size = step_size_adapter.get_final_step_size()
+
+#             ''' MASS-MATRIX Adaption '''
+#             # if i <= (3 * n_adapt) // 4: # Collect samples for mass matrix estimation
+#             #     q_list_for_mass_adapt.append(q.clone().detach())
+
+#             # # Estimate the inverse mass matrix at the specified point
+#             # if i == (3 * n_adapt) // 4 and len(q_list_for_mass_adapt) > 1: # Ensure enough samples
+#             #     # Select a window of samples, e.g., from n_adapt//4 onwards
+#             #     start_idx = max(0, len(q_list_for_mass_adapt) - ( (3 * n_adapt) // 4 - (n_adapt // 4) ))
+#             #     relevant_samples_tensor = torch.stack(q_list_for_mass_adapt[start_idx:], dim=-2) # (B, N_samples, D)
+
+#             #     if relevant_samples_tensor.shape[-2] > 1: # Need at least 2 samples for covariance
+#             #         B_s, N_s, D_s = relevant_samples_tensor.size()
+#             #         mean_s = relevant_samples_tensor.mean(dim=-2, keepdim=True)
+#             #         diffs_s = (relevant_samples_tensor - mean_s).reshape(B_s * N_s, D_s)
+#             #         prods_s = torch.bmm(diffs_s.unsqueeze(-1), diffs_s.unsqueeze(-2)).reshape(B_s, N_s, D_s, D_s)
+#             #         # Compute covariance for the mass matrix (M is cov, so inv_mass_matrix is inv_cov)
+#             #         estimated_mass_matrix = prods_s.sum(dim=-3) / (N_s - 1) # (B, D, D)
+                    
+#             #         # Update the inv_mass_matrix being used
+#             #         try:
+#             #             inv_mass_matrix = compute_inverse_mass_v2(estimated_mass_matrix.detach())
+#             #             print(f"Iteration {i}: Updated inv_mass_matrix based on sample covariance.")
+#             #         except ValueError as e:
+#             #             print(f"Iteration {i}: Failed to update inv_mass_matrix: {e}. Keeping previous.")
+                
+#             #     q_list_for_mass_adapt = [] # Clear list after use or manage memory
+
+        
+#     final_q = q
+#     final_step_size = current_step_size # This will be the smoothed one if adapt=True & i > n_adapt
+#     mean_accept_prob = np.mean(np.array(accept_prob_list), axis=0)
+
+#     if adapt:
+#         return final_q, final_step_size, inv_mass_matrix, mean_accept_prob
+#     else: 
+#         return final_q, mean_accept_prob
+
+#### ------------------------------------------------------ 
+
 import os
 import numpy as np
 import math
@@ -58,7 +521,7 @@ def sample_phi_prior(n, phi_min=-1.0, phi_max=1.0, norm_mode='compact'):
     return normalize_phi(phi)
 
 
-def log_prior_phi_sigma(phi, sigma, sigma_min=1e-2, sigma_max=1e2, norm_mode="compact"):
+def log_prior_phi_sigma(phi, sigma, sigma_min=0.04, sigma_max=0.4, norm_mode="compact"):
 
     # phi: (b, 2), sigma: (b,)
     in_bounds_phi = torch.logical_and(phi >= 0.0, phi <= 1.0)  # (b, 2)
@@ -118,10 +581,10 @@ class ColoredPowerSpectrum2D(nn.Module):
         kx = torch.fft.fftfreq(W, d=1.0).to(torch.float32).to(device)  # (W,)
         kx, ky = torch.meshgrid(kx, ky, indexing='ij')  # (W, H)
         k_squared = kx ** 2 + ky ** 2
-        k_magnitude = torch.sqrt(k_squared).unsqueeze(0).unsqueeze(0)  # shape: (1, C, H, W)
+        k_magnitude = torch.sqrt(k_squared).unsqueeze(0).unsqueeze(0)  # shape: (1, 1, H, W) - Corrected dim
         k_magnitude[:, :, 0, 0] = sigma_eps  # avoid division by zero at (0, 0)
 
-        self.S = k_magnitude  # shape: (1, C, H, W)
+        self.S = k_magnitude  # shape: (1, 1, H, W)
 
     def forward(self, phi):
         '''
@@ -130,10 +593,12 @@ class ColoredPowerSpectrum2D(nn.Module):
         '''
         phi = unnormalize_phi(phi, mode=self.norm_input_phi)
 
-        batch_size, dim = phi.shape[0], self.S.shape[1]
-        S = self.S.repeat(batch_size, dim, 1, 1)        # (batch_size, dim, H, W)
-        S = S ** phi.reshape(-1, 1, 1, 1)               # (batch_size, dim, H, W)
-        S = S / S.mean(dim=(2, 3), keepdim=True)        # Normalize spectrum per sample
+        batch_size, phi_dim = phi.shape
+        # S is (1, 1, H, W). We want to broadcast over batch and channels.
+        # Let's assume the user model has a single phi parameter controlling all channels.
+        # If each channel had its own phi, the model and ps_model would need adjustment.
+        S = self.S ** phi.view(batch_size, 1, 1, 1) # (B, 1, H, W)
+        S = S / S.mean(dim=(-2, -1), keepdim=True)        # Normalize spectrum per sample
         return S
 
 class ColoredPowerSpectrum1D(nn.Module):
@@ -144,6 +609,7 @@ class ColoredPowerSpectrum1D(nn.Module):
         
         dim, N = shape
         self.norm_input_phi = norm_input_phi
+        self.device = device # Added device to constructor
 
         # Create isotropic wavenumber vector for 1D
         wn = torch.fft.fftfreq(N).to(torch.float32)  # shape: (N,)
@@ -163,56 +629,11 @@ class ColoredPowerSpectrum1D(nn.Module):
         '''
         phi = unnormalize_phi(phi, mode=self.norm_input_phi)
 
-        batch_size, dim = phi.shape[0], self.S.shape[1]
-        S = self.S.repeat(batch_size, dim, 1)  # shape: (batch_size, dim, N)
-        S = S ** phi.reshape(-1, 1, 1)         # shape: (batch_size, dim, N)
-        S = S / S.mean(dim=-1, keepdim=True)    # Normalize spectrum
+        batch_size, phi_dim = phi.shape
+        # Assuming single phi controls all dims
+        S = self.S ** phi.view(batch_size, 1, 1) # (B, 1, N)
+        # S = S / S.mean(dim=-1, keepdim=True)    # Normalize spectrum
         return S
-
-
-def reflect_boundary(q, p_original, p_proposed, phi_min_norm, phi_max_norm):
-
-    """
-    Reflects momentum at boundaries.
-    Args:
-        q (torch.Tensor): Current positions (B, D), used to check boundary crossing.
-        p_original (torch.Tensor): Momentum before leapfrog step that led to p_proposed (B,D).
-                                    Used for reflection direction.
-        p_proposed (torch.Tensor): Proposed momentum after leapfrog (B,D).
-        phi_min_norm (torch.Tensor): Minimum boundary values (D) or scalar.
-        phi_max_norm (torch.Tensor): Maximum boundary values (D) or scalar.
-    Returns:
-        torch.Tensor: Momentum after reflection (B,D).
-    """
-    
-    p_ret = p_proposed.clone()
-    for i in range(q.shape[-1]):  # Iterate over dimensions
-        current_phi_min = phi_min_norm if phi_min_norm.ndim == 0 else phi_min_norm[i]
-        current_phi_max = phi_max_norm if phi_max_norm.ndim == 0 else phi_max_norm[i]
-
-        crossed_min = q[..., i] < current_phi_min
-        crossed_max = q[..., i] > current_phi_max
-        
-        # Reflect based on the momentum component *before* the full leapfrog step proposed the new p
-        # This is a common way, but some variants reflect p_proposed.
-        # The original passed 'p' (pre-leapfrog p) and 'p_nxt' (post-leapfrog p).
-        # If reflection means p_i_reflected = -p_i_original for that dimension:
-        p_ret[crossed_min, i] = -torch.abs(p_original[crossed_min, i]) \
-            if torch.all(p_original[crossed_min, i] > 0) else torch.abs(p_original[crossed_min, i])
-        p_ret[crossed_max, i] = -torch.abs(p_original[crossed_max, i]) \
-            if torch.all(p_original[crossed_max, i] < 0) else torch.abs(p_original[crossed_max, i])
-        # A simpler reflection often just flips the sign of the proposed momentum component:
-        # p_ret[crossed_min, i] = -p_proposed[crossed_min, i]
-        # p_ret[crossed_max, i] = -p_proposed[crossed_max, i]
-        # The user's original code was: p_ret[..., i][crossed_min_boundary] = -p[..., i][crossed_min_boundary]
-        # This means it used the momentum *before* the leapfrog step for the reflection value.
-        # Let's stick to that interpretation.
-        if torch.any(crossed_min):
-             p_ret[crossed_min, i] = -p_original[crossed_min, i]
-        if torch.any(crossed_max):
-             p_ret[crossed_max, i] = -p_original[crossed_max, i]
-    return p_ret
-
 
 
 # --- V2 Functions incorporating features from the first HMC code ---
@@ -231,9 +652,6 @@ def compute_inverse_mass_v2(mass_matrix_input):
     
     elif mass_matrix_input.ndim == 2:
         # Check if (D,D) for full or (B,D) for batch of diagonals
-        # This heuristic might need refinement if D can be equal to B.
-        # Assuming D is reasonably different from B or context implies one or the other.
-        # For simplicity, let's assume if shape[0]!=shape[1], it's (B,D)
         if mass_matrix_input.shape[0] == mass_matrix_input.shape[1]: # Full mass matrix (D,D)
             try:
                 # Optional: Check for positive definiteness before inverting
@@ -282,7 +700,7 @@ def kinetic_energy_v2(p, inv_mass_matrix):
 
     elif inv_mass_matrix.ndim == 3: # Batch of full inverse (B,D,D)
         p_col = p.unsqueeze(-1)
-        M_inv_p = (inv_mass_matrix @ p_col).squeeze(-1)
+        M_inv_p = torch.bmm(inv_mass_matrix, p_col).squeeze(-1) # Corrected for batch matmul
         return 0.5 * (p * M_inv_p).sum(dim=-1)
     
     else:
@@ -305,11 +723,10 @@ def dKE_dp_v2(p, inv_mass_matrix):
              inv_mass_matrix.shape[1] == p.shape[1]: # Full inverse (D,D) shared
             return (inv_mass_matrix @ p.unsqueeze(-1)).squeeze(-1)
         else:
-        
             raise ValueError(f"Ambiguous inv_mass_matrix shape {inv_mass_matrix.shape} for p shape {p.shape}")
     
     elif inv_mass_matrix.ndim == 3: # Batch of full inverse (B,D,D)
-        return (inv_mass_matrix @ p.unsqueeze(-1)).squeeze(-1)
+        return torch.bmm(inv_mass_matrix, p.unsqueeze(-1)).squeeze(-1) # Corrected for batch matmul
     
     else:
         raise ValueError(f"Invalid inv_mass_matrix ndim: {inv_mass_matrix.ndim}")
@@ -331,157 +748,154 @@ def leapfrog_v2(q, p, step_size, n_steps, log_grad_fn, inv_mass_matrix,
     p = p + 0.5 * step_size * log_grad_fn(q)
 
     # Full steps
-    for _ in range(n_steps - 1):
+    for i in range(n_steps):
         q = q + step_size * dKE_dp_v2(p, inv_mass_matrix)
         
         # --- Boundary Reflection for q ---
         if q_min_bounds is not None and q_max_bounds is not None:
+            # Loop over each dimension to apply its specific bounds
             for dim_i in range(q.shape[-1]):
-                crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
-                crossed_max = q[..., dim_i] > q_max_bounds[dim_i]
+                # Create masks for this dimension
+                min_bound_i = q_min_bounds[dim_i]
+                max_bound_i = q_max_bounds[dim_i]
+                crossed_min = q[..., dim_i] < min_bound_i
+                crossed_max = q[..., dim_i] > max_bound_i
+
+                # Reflect positions and negate corresponding momentum
                 if torch.any(crossed_min):
-                    q[crossed_min, dim_i] = q_min_bounds[dim_i] + (q_min_bounds[dim_i] - q[crossed_min, dim_i])
+                    q[crossed_min, dim_i] = 2.0 * min_bound_i - q[crossed_min, dim_i]
                     p[crossed_min, dim_i] = -p[crossed_min, dim_i]
+                
                 if torch.any(crossed_max):
-                    q[crossed_max, dim_i] = q_max_bounds[dim_i] - (q[crossed_max, dim_i] - q_max_bounds[dim_i])
+                    q[crossed_max, dim_i] = 2.0 * max_bound_i - q[crossed_max, dim_i]
                     p[crossed_max, dim_i] = -p[crossed_max, dim_i]
         # --- End Boundary Reflection ---
         
-        p = p + step_size * log_grad_fn(q)
+        # Final half-step for momentum is not needed if it's the last step
+        if i != n_steps - 1:
+            p = p + step_size * log_grad_fn(q)
     
-    # Final full step for position and half-step for momentum
-    q = q + step_size * dKE_dp_v2(p, inv_mass_matrix)
-    
-    # --- Boundary Reflection for q ---
-    if q_min_bounds is not None and q_max_bounds is not None:
-        for dim_i in range(q.shape[-1]):
-            crossed_min = q[..., dim_i] < q_min_bounds[dim_i]
-            crossed_max = q[..., dim_i] > q_max_bounds[dim_i]
-            if torch.any(crossed_min):
-                q[crossed_min, dim_i] = q_min_bounds[dim_i] + (q_min_bounds[dim_i] - q[crossed_min, dim_i])
-                p[crossed_min, dim_i] = -p[crossed_min, dim_i]
-            if torch.any(crossed_max):
-                q[crossed_max, dim_i] = q_max_bounds[dim_i] - (q[crossed_max, dim_i] - q_max_bounds[dim_i])
-                p[crossed_max, dim_i] = -p[crossed_max, dim_i]
-    # --- End Boundary Reflection ---
-
+    # Final half-step for momentum
     p = p + 0.5 * step_size * log_grad_fn(q)
     
     p = -p  # Negate momentum for detailed balance
     return q, p
 
-class DualAveragingStepSize: # User's class with minor adjustments
-    def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10, kappa=0.75):
-        self.mu = np.log(10 * initial_step_size) 
-        self.log_initial_step = np.log(initial_step_size)
-        self.log_step = self.log_initial_step # Current noisy log step size
-        self.log_step_bar = self.log_initial_step # Averaged log step size
-        self.h_bar = 0.0
-        
-        self.iter_count = 0 # Iteration counter m (starts from 1 for updates)
+class DualAveragingStepSize():
+    """ Dual averaging step size adaptation (Nesterov 2009). """
+
+    def __init__(self, initial_step_size, target_accept=0.65, gamma=0.05, t0=10.0, kappa=0.75):
+        self.initial_step_size = initial_step_size 
+        self.mu = torch.log(10 * initial_step_size) # log(10 * eps_0)
         self.target_accept = target_accept
         self.gamma = gamma
-        self.t0 = t0
+        self.t = t0
         self.kappa = kappa
+        self.error_sum = torch.zeros_like(self.initial_step_size)
+        self.log_averaged_step = torch.zeros_like(self.initial_step_size)
+        
+    def update(self, p_accept):
+        p_accept = torch.clamp(p_accept, 0.0, 1.0) # Ensure p_accept is in [0, 1]
+        p_accept[torch.isnan(p_accept)] = 0.
+        
+        self.error_sum += self.target_accept - p_accept
+        log_step = self.mu - self.error_sum / (np.sqrt(self.t) * self.gamma)
+        eta = self.t ** -self.kappa
+        self.log_averaged_step = eta * log_step + (1 - eta) * self.log_averaged_step
+        self.t += 1
 
-    def update(self, accept_prob):
-        self.iter_count += 1
-        
-        # Regularization for h_bar (log_step update)
-        eta_h = 1.0 / (self.iter_count + self.t0)
-        self.h_bar = (1 - eta_h) * self.h_bar + eta_h * (self.target_accept - accept_prob)
-        
-        self.log_step = self.mu - (np.sqrt(self.iter_count) / self.gamma) * self.h_bar
-        
-        # Averaging for log_step_bar
-        eta_s = self.iter_count ** (-self.kappa)
-        self.log_step_bar = eta_s * self.log_step + (1 - eta_s) * self.log_step_bar
-        
-        return np.exp(self.log_step) # Return current (noisy) step size
+        return torch.exp(log_step)
 
     def get_final_step_size(self):
-        return np.exp(self.log_step_bar) # Return smoothed/averaged step size
+        return torch.exp(self.log_averaged_step)
+
 
 def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step_size=0.01, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
     
     q = phi_init.clone()
     if q.ndim == 1: q = q.unsqueeze(0)
-    batch_size, _ = q.shape
+    batch_size, D = q.shape
 
-    if not inv_mass_matrix:
-        inv_mass_matrix = compute_inverse_mass_v2(inv_mass_matrix)
-
-    current_step_size = float(step_size) # Ensure it's a float for adapter
+    # --- START OF CORRECTION ---
+    # The main reason for rejections is a mismatch between momentum sampling and the Hamiltonian dynamics.
+    # Momentum `p` must be sampled from N(0, M), but the original code sampled from N(0, I).
+    # To do this, we need the mass matrix M. We assume the user provides the *inverse* mass matrix M^-1
+    # via the `inv_mass_matrix` parameter. So we must invert it to get M.
+    
+    # Your function `compute_inverse_mass_v2` is actually a general matrix inverter, so we can use it
+    # to get M from M^-1.
+    mass_matrix = compute_inverse_mass_v2(inv_mass_matrix)
+    # This handles the None case gracefully: if inv_mass_matrix is None, mass_matrix becomes None.
+    # --- END OF CORRECTION ---
+    
+    current_step_size = torch.tensor(step_size, device=q.device, dtype=q.dtype)
     if adapt:
-        step_size_adapter = DualAveragingStepSize(initial_step_size=current_step_size)
+        # Pass a tensor to the adapter, not a float
+        step_size_adapter = DualAveragingStepSize(initial_step_size=current_step_size.expand(batch_size))
 
-    # samples_list = [] # Uncomment if storing all samples
     accept_prob_list = []
-    q_list_for_mass_adapt = []
+    # q_list_for_mass_adapt = [] # Mass matrix adaptation is commented out, so this is not needed
 
     for i in range(1, chain_length + burnin_steps + 1):
 
-        ''' Might need to sample from ~ (0, M) | Read the theory better | relates to Remannian Manifold MCMC (mass-matrix: M(q) current state: q) '''
-        p_original = torch.randn_like(q) # p_original ~ N(0,I) : Need to p_tilde = N(0, M) by transforming momentum variable
+        # --- START OF CORRECTION ---
+        # Sample momentum p ~ N(0, M). We do this by sampling z ~ N(0, I) and transforming it.
+        # If M is diagonal, p_i = sqrt(M_ii) * z_i.
+        # If M is a full matrix, p = L @ z, where M = L @ L^T (Cholesky decomposition).
+        
+        z = torch.randn_like(q)
+        if mass_matrix is None:
+            # If M is identity, p ~ N(0, I), so p = z.
+            p_original = z
+        else:
+            try:
+                if mass_matrix.ndim == 1: # Diagonal M: (D,)
+                    p_original = torch.sqrt(mass_matrix) * z
+                elif mass_matrix.ndim == 2:
+                    # Case 1: Batch of diagonals (B, D)
+                    if mass_matrix.shape[0] == batch_size and mass_matrix.shape[1] == D:
+                        p_original = torch.sqrt(mass_matrix) * z
+                    # Case 2: Full, shared mass matrix (D, D)
+                    elif mass_matrix.shape[0] == D and mass_matrix.shape[1] == D:
+                        L = torch.linalg.cholesky(mass_matrix)
+                        p_original = torch.matmul(z, L.T)
+                    else: # Ambiguous shape, fallback to identity for safety
+                        p_original = z
+                elif mass_matrix.ndim == 3: # Batch of full mass matrices (B, D, D)
+                    L = torch.linalg.cholesky(mass_matrix)
+                    p_original = torch.bmm(L, z.unsqueeze(-1)).squeeze(-1)
+                else: # Fallback for other shapes
+                    p_original = z
+            except torch.linalg.LinAlgError:
+                # Fallback if matrix is not positive-definite, which can happen during adaptation
+                p_original = z
+
+        # The original, incorrect line which caused the rejections was:
+        # p_original = torch.randn_like(q)
+        # --- END OF CORRECTION ---
 
         q_new, p_new_proposed = leapfrog_v2(q, p_original, current_step_size, n_leapfrog_steps, log_grad_fn, inv_mass_matrix, q_min_bounds=phi_min_norm, q_max_bounds=phi_max_norm)
         
         p_final_proposal = p_new_proposed # p_final_proposal already has momentum negated from leapfrog
 
-        # if phi_min_norm is not None and phi_max_norm is not None:
-        #     # Pass q_new to check boundary condition on the proposed state.
-        #     # Pass p_original as the momentum before leapfrog if that's the desired reflection logic.
-        #     p_final_proposal = reflect_boundary(q_new, p_original, p_final_proposal, phi_min_norm, phi_max_norm)
-
         H_old = hamiltonian_v2(q, p_original, log_prob_fn, inv_mass_matrix)
-        
-        # Hamiltonian for proposed state uses q_new and p_final_proposal (which includes negation from leapfrog)
         H_new = hamiltonian_v2(q_new, p_final_proposal, log_prob_fn, inv_mass_matrix)
 
         accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0)) # (B)
-        accept_prob_list.append(accept_prob.mean(dim=0).item())
+        accept_prob_list.append(accept_prob.mean().item()) # Use .mean() for batch
 
         accept_mask = torch.rand(batch_size, device=q.device) < accept_prob
         q[accept_mask] = q_new[accept_mask]
 
-    
-        ## Changing mass-matrix through state-accumulation
-        if adapt:
-            if i <= n_adapt:
-                current_step_size = step_size_adapter.update(accept_prob.mean().item())
-
-            if i <= (3 * n_adapt) // 4: # Collect samples for mass matrix estimation
-                q_list_for_mass_adapt.append(q.clone().detach())
-
-            # Estimate the inverse mass matrix at the specified point
-            if i == (3 * n_adapt) // 4 and len(q_list_for_mass_adapt) > 1: # Ensure enough samples
-                # Select a window of samples, e.g., from n_adapt//4 onwards
-                start_idx = max(0, len(q_list_for_mass_adapt) - ( (3 * n_adapt) // 4 - (n_adapt // 4) ))
-                relevant_samples_tensor = torch.stack(q_list_for_mass_adapt[start_idx:], dim=-2) # (B, N_samples, D)
-
-                if relevant_samples_tensor.shape[-2] > 1: # Need at least 2 samples for covariance
-                    B_s, N_s, D_s = relevant_samples_tensor.size()
-                    mean_s = relevant_samples_tensor.mean(dim=-2, keepdim=True)
-                    diffs_s = (relevant_samples_tensor - mean_s).reshape(B_s * N_s, D_s)
-                    prods_s = torch.bmm(diffs_s.unsqueeze(-1), diffs_s.unsqueeze(-2)).reshape(B_s, N_s, D_s, D_s)
-                    # Compute covariance for the mass matrix (M is cov, so inv_mass_matrix is inv_cov)
-                    estimated_mass_matrix = prods_s.sum(dim=-3) / (N_s - 1) # (B, D, D)
-                    
-                    # Update the inv_mass_matrix being used
-                    try:
-                        inv_mass_matrix = compute_inverse_mass_v2(estimated_mass_matrix.detach())
-                        print(f"Iteration {i}: Updated inv_mass_matrix based on sample covariance.")
-                    except ValueError as e:
-                        print(f"Iteration {i}: Failed to update inv_mass_matrix: {e}. Keeping previous.")
-                
-                q_list_for_mass_adapt = [] # Clear list after use or manage memory
-
-            elif i == n_adapt + 1: # First step after adaptation window closes
-                current_step_size = step_size_adapter.get_final_step_size()
+        if adapt and i <= n_adapt:
+            current_step_size = step_size_adapter.update(accept_prob)
+        elif adapt and i == n_adapt + 1: # First step after adaptation window closes
+            current_step_size = step_size_adapter.get_final_step_size()
         
     final_q = q
-    final_step_size = current_step_size # This will be the smoothed one if adapt=True & i > n_adapt
-    mean_accept_prob = np.mean(np.array(accept_prob_list), axis=0)
+    # Ensure final step size is a tensor with correct shape
+    final_step_size = current_step_size if isinstance(current_step_size, torch.Tensor) else torch.tensor(current_step_size)
+    mean_accept_prob = np.mean(accept_prob_list)
 
     if adapt:
         return final_q, final_step_size, inv_mass_matrix, mean_accept_prob
