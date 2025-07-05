@@ -521,7 +521,11 @@ def sample_phi_prior(n, phi_min=-1.0, phi_max=1.0, norm_mode='compact'):
     return normalize_phi(phi)
 
 
-def log_prior_phi_sigma(phi, sigma, sigma_min=0.04, sigma_max=0.4, norm_mode="compact"):
+def log_prior_phi_sigma(phi_all, sigma_min=0.04, sigma_max=0.4, norm_mode="compact"):
+    
+    # Unpack parameters
+    phi = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
+    sigma = phi_all[:, 1].unsqueeze(-1) # Shape [B, 1]
 
     # phi: (b, 2), sigma: (b,)
     in_bounds_phi = torch.logical_and(phi >= 0.0, phi <= 1.0)  # (b, 2)
@@ -535,7 +539,11 @@ def log_prior_phi_sigma(phi, sigma, sigma_min=0.04, sigma_max=0.4, norm_mode="co
     return logp
 
 
-def log_likelihood_eps_phi_sigma(phi, sigma, eps, ps_model):
+def log_likelihood_eps_phi_sigma(phi_all, eps, ps_model):
+    
+    # Unpack parameters
+    phi = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
+    sigma = phi_all[:, 1].unsqueeze(-1)         # Shape [B, 1]
     
     ps = ps_model(phi)
 
@@ -632,7 +640,7 @@ class ColoredPowerSpectrum1D(nn.Module):
         batch_size, phi_dim = phi.shape
         # Assuming single phi controls all dims
         S = self.S ** phi.view(batch_size, 1, 1) # (B, 1, N)
-        # S = S / S.mean(dim=-1, keepdim=True)    # Normalize spectrum
+        S = S / S.mean(dim=-1, keepdim=True)    # Normalize spectrum
         return S
 
 
@@ -798,7 +806,7 @@ class DualAveragingStepSize():
         p_accept = torch.clamp(p_accept, 0.0, 1.0) # Ensure p_accept is in [0, 1]
         p_accept[torch.isnan(p_accept)] = 0.
         
-        self.error_sum += self.target_accept - p_accept
+        self.error_sum += self.target_accept - p_accept.squeeze(-1)
         log_step = self.mu - self.error_sum / (np.sqrt(self.t) * self.gamma)
         eta = self.t ** -self.kappa
         self.log_averaged_step = eta * log_step + (1 - eta) * self.log_averaged_step
@@ -813,7 +821,9 @@ class DualAveragingStepSize():
 def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step_size=0.01, n_leapfrog_steps=50, chain_length=100, burnin_steps=20, adapt=True, n_adapt=100, phi_min_norm=None, phi_max_norm=None):
     
     q = phi_init.clone()
+   
     if q.ndim == 1: q = q.unsqueeze(0)
+   
     batch_size, D = q.shape
 
     # --- START OF CORRECTION ---
@@ -884,9 +894,11 @@ def sample_hmc_v2(log_prob_fn, log_grad_fn, phi_init, inv_mass_matrix=None, step
         accept_prob = torch.exp(torch.clamp(H_old - H_new, max=0.0)) # (B)
         accept_prob_list.append(accept_prob.mean().item()) # Use .mean() for batch
 
-        accept_mask = torch.rand(batch_size, device=q.device) < accept_prob
-        q[accept_mask] = q_new[accept_mask]
-
+        u = torch.rand(batch_size, device=q.device)
+        accept_mask = u < accept_prob
+        
+        q[accept_mask.squeeze(-1)] = q_new[accept_mask.squeeze(-1)].detach() # Update state
+        
         if adapt and i <= n_adapt:
             current_step_size = step_size_adapter.update(accept_prob)
         elif adapt and i == n_adapt + 1: # First step after adaptation window closes

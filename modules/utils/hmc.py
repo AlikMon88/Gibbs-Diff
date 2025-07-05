@@ -493,6 +493,7 @@ def log_likelihood_eps_phi_sigma(phi_all, eps, ps_model):
     eps: Tensor of noise residuals, shape [B, C, ...]
     ps_model: The power spectrum model (e.g., ColoredPowerSpectrum2D)
     """
+    
     # Unpack parameters
     phi_normalized = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
     sigma = phi_all[:, 1].unsqueeze(-1)         # Shape [B, 1]
@@ -773,91 +774,3 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Running on device: {device}")
 
-    # Create dummy data for a 1D test case
-    batch_size = 2
-    seq_len = 100
-    channels = 1
-    
-    # True parameters
-    true_phi_physical = torch.tensor([-0.8, 0.5], device=device).unsqueeze(-1) # Two different spectral indices
-    true_phi_normalized = normalize_phi(true_phi_physical)
-    true_sigma = torch.tensor([0.1, 0.3], device=device).unsqueeze(-1)
-
-    # Create power spectrum model and generate true noise residual
-    ps_model = ColoredPowerSpectrum1D(shape=(channels, seq_len), device=device)
-    true_ps = ps_model(true_phi_normalized)
-    noise_fourier = torch.sqrt(true_ps) * torch.randn_like(true_ps, dtype=torch.cfloat)
-    true_eps = torch.fft.ifft(noise_fourier).real # This is our "data"
-
-    # Define the log posterior and its gradient for HMC
-    def log_posterior(phi_all_state):
-        # phi_all_state is [B, 2] with (phi_norm, sigma)
-        prior = log_prior_phi_sigma(phi_all_state)
-        # Check for invalid prior to avoid computing likelihood
-        valid_mask = ~torch.isinf(prior)
-        likelihood = torch.zeros_like(prior)
-        if torch.any(valid_mask):
-            likelihood[valid_mask] = log_likelihood_eps_phi_sigma(
-                phi_all_state[valid_mask],
-                true_eps[valid_mask], # Use corresponding true_eps
-                ps_model
-            )
-        return prior + likelihood
-
-    def gradient_log_posterior(phi_all_state):
-        phi_clone = phi_all_state.clone().requires_grad_(True)
-        logp = log_posterior(phi_clone)
-        # Compute gradient only for valid states to avoid NaN propagation
-        valid_mask = ~torch.isinf(logp)
-        grad_phi = torch.zeros_like(phi_clone)
-        if torch.any(valid_mask):
-            # Summing valid logp values for a scalar input to autograd
-            grad_output = torch.autograd.grad(logp[valid_mask].sum(), phi_clone, allow_unused=True)[0]
-            if grad_output is not None:
-                grad_phi = grad_output
-        return grad_phi.detach()
-
-    # Initialize HMC chains
-    init_phi_norm = torch.rand(batch_size, 1, device=device) # Start with random normalized phi
-    init_sigma = torch.rand(batch_size, 1, device=device) * (SIGMA_MAX - SIGMA_MIN) + SIGMA_MIN
-    q_initial = torch.cat([init_phi_norm, init_sigma], dim=1)
-    
-    # Define bounds for HMC
-    q_min, q_max = torch.tensor([0.0, SIGMA_MIN], device=device), torch.tensor([1.0, SIGMA_MAX], device=device)
-
-    print("Starting HMC Test...")
-    print(f"Initial State (q_init):\n{q_initial}")
-    print(f"True Normalized Phi: {true_phi_normalized.squeeze(-1)}")
-    print(f"True Sigma: {true_sigma.squeeze(-1)}")
-    
-    # Run HMC
-    samples, final_step, _, final_acceptance = sample_hmc(
-        log_prob_fn=log_posterior,
-        log_grad_fn=gradient_log_posterior,
-        q_init=q_initial,
-        step_size=1e-3, # Start with a smaller step size
-        n_leapfrog_steps=15,
-        chain_length=1000, # More samples
-        burnin_steps=500,  # More burn-in
-        adapt=True,
-        q_min_bounds=q_min,
-        q_max_bounds=q_max
-    )
-    
-    print("\nHMC Finished.")
-    print(f"Final Acceptance Rate: {final_acceptance:.3f}")
-    
-    # Analyze results
-    # Get posterior mean from the collected samples
-    posterior_mean = samples.mean(dim=1) # Mean over the chain_length dimension
-    posterior_mean_phi_norm = posterior_mean[:, 0]
-    posterior_mean_sigma = posterior_mean[:, 1]
-    
-    # Unnormalize phi to compare with physical true value
-    posterior_mean_phi_physical = unnormalize_phi(posterior_mean_phi_norm)
-
-    print("\n--- Results ---")
-    for i in range(batch_size):
-        print(f"\nChain {i}:")
-        print(f"  True Values:      phi={true_phi_physical[i].item():.4f}, sigma={true_sigma[i].item():.4f}")
-        print(f"  Posterior Mean:   phi={posterior_mean_phi_physical[i].item():.4f}, sigma={posterior_mean_sigma[i].item():.4f}")

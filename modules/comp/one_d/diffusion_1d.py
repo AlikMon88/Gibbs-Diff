@@ -19,12 +19,14 @@ from tqdm.auto import tqdm
 from ...utils.helper import *
 from .unet_1d import *
 from ...utils.noise_create import get_colored_noise_1d
-from ...utils.hmc import *
-from ...utils.hmc import get_noise_estimate_1d, get_noise_estimate_2d
-from ...utils.hmc import sample_hmc
-from ...utils.hmc import get_phi_all_bounds
+
+# from ...utils.hmc import *
+# from ...utils.hmc import get_noise_estimate_1d, get_noise_estimate_2d
+# from ...utils.hmc import sample_hmc
+# from ...utils.hmc import get_phi_all_bounds
 
 ## HMC-verison2
+from ...utils.hmc_v2 import *
 from ...utils.hmc_v2 import get_noise_estimate_1d, get_noise_estimate_2d
 from ...utils.hmc_v2 import sample_hmc_v2
 from ...utils.hmc_v2 import get_phi_all_bounds
@@ -81,10 +83,10 @@ class GibbsDiff1D(nn.Module):
         self.alpha_t = 1 - self.beta_t
         self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0) 
 
-        self.n_leapfrog_steps = 50 
-        self.chain_length =  100
-        self.burnin_steps = 75
-        self.n_adapt = 65
+        self.n_leapfrog_steps = 20 
+        self.chain_length =  150
+        self.burnin_steps = 80
+        self.n_adapt = 60
 
         if not sampling_timesteps:
             self.sampling_timesteps = self.num_timesteps
