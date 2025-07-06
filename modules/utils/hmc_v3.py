@@ -70,48 +70,55 @@ def sample_phi_prior(n, phi_min=PHI_MIN, phi_max=PHI_MAX, device=None):
 
 def log_prior_phi_sigma(phi_all, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX):
     
-    """
-    Compute the log prior of the parameters.
-    the sigma range should be restricted to a reasonable range
-    """
-
     # Unpack parameters
     phi = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
     sigma = phi_all[:, 1].unsqueeze(-1) # Shape [B, 1]
 
-    
     logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float()) #gives either 0 or -inf
     for i in range(1, phi.shape[-1]):
         logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
-    
-    ## Add prior on sigma
+
     logp += torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float()).squeeze(-1)
     return logp
 
+
 def log_likelihood_eps_phi_sigma(phi_all, eps, ps_model):
-    
-    """
-    Compute the log likelihood of the Gaussian model (epsilon | phi).
-    """
     
     # Unpack parameters
     phi = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
-    sigma = phi_all[:, 1].unsqueeze(-1) # Shape [B, 1]
+    sigma = phi_all[:, 1].unsqueeze(-1)         # Shape [B, 1]
     
-    eps_dim = eps.shape[-1]*eps.shape[-2]
     ps = ps_model(phi)
-    xf = torch.fft.fft2(eps)
-    sigma = sigma.reshape(-1, 1, 1, 1)
 
-    term_pi = -(eps_dim/2) * np.log(2*np.pi)
-    term_logdet = -0.5 * torch.sum(torch.log(sigma**2*ps), dim=(-1, -2, -3)) # The determinant is the product of the diagonal elements of the PS
-    term_x = -0.5 * torch.sum((torch.abs(xf).pow(2)) / (sigma**2*ps), dim=(-1, -2, -3))/eps_dim # We divide by eps_dim because of the normalization of the FFT
-    return term_pi + term_logdet + term_x
+    if eps.ndim == 3:  # 1D case
+        eps_dim = eps.shape[-1]
+        xf = torch.fft.fft(eps)
+        sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # (B, 1)
+        scaled_ps = sigma**2 * ps
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=(-1, -2))
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=(-1, -2)) / eps_dim
+
+    elif eps.ndim == 4:  # 2D image case
+        H, W = eps.shape[-2], eps.shape[-1]
+        eps_dim = H * W
+        xf = torch.fft.fft2(eps)
+        sigma = sigma.view(-1, 1, 1, 1) if sigma.ndim == 1 else sigma
+        scaled_ps = sigma**2 * ps
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=(-1, -2, -3))
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=(-1, -2, -3)) / eps_dim
+
+    else:
+        raise ValueError("eps must be 2D (1D case) or 4D (image case)")
+    
+    log_likelihood = term_pi + term_logdet + term_x  # (b, dim)
+    return log_likelihood
 
 
-class ColoredPS(nn.Module):
 
-    def __init__(self, norm_input_phi = 'compact', shape = (3, 256, 256)):
+class ColoredPowerSpectrum2D(nn.Module):
+    def __init__(self, shape = (3, 256, 256), device='cpu', sigma_eps=1e-6):
         super().__init__()
         shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape, )
         ndim = len(shape) - 1
@@ -130,8 +137,7 @@ class ColoredPS(nn.Module):
         self.S = torch.sqrt(S)
 
         self.S[:,:, 0, 0] = 1
-        self.norm_input_phi = norm_input_phi
-    
+        
     def forward(self, phi):
         '''Generates a power spectrum S(k) ~ k^alpha
         alpha: tensor of alpha of size (batch_size, phi_dim)
@@ -144,13 +150,12 @@ class ColoredPS(nn.Module):
         return S
 
 class ColoredPowerSpectrum1D(nn.Module):
-    def __init__(self, norm_input_phi='compact', shape=(1, 100), device='cpu'):
+    def __init__(self, shape=(1, 100), device='cpu'):
         super().__init__()
         shape = tuple(shape) if isinstance(shape, (list, tuple)) else (shape,)
         assert len(shape) == 2  # (dim, seq_len)
         
         dim, N = shape
-        self.norm_input_phi = norm_input_phi
         self.device = device # Added device to constructor
 
         # Create isotropic wavenumber vector for 1D

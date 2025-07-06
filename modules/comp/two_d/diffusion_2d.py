@@ -20,8 +20,23 @@ from tqdm.auto import tqdm
 from ...utils.helper import *
 from .unet_2d import *
 from ...utils.noise_create_2d import get_colored_noise_2d
-from ...utils.hmc import *
-from ...utils.hmc_v2 import *
+
+# from ...utils.hmc import *
+# from ...utils.hmc import get_noise_estimate_1d, get_noise_estimate_2d
+# from ...utils.hmc import sample_hmc
+# from ...utils.hmc import get_phi_all_bounds
+
+## HMC-verison2
+# from ...utils.hmc_v2 import *
+# from ...utils.hmc_v2 import get_noise_estimate_1d, get_noise_estimate_2d
+# from ...utils.hmc_v2 import sample_hmc_v2
+# from ...utils.hmc_v2 import get_phi_all_bounds
+
+## HMC-version3
+from ...utils.hmc_v3 import *
+from ...utils.hmc_v3 import get_noise_estimate_1d, get_noise_estimate_2d
+from ...utils.hmc_v3 import get_phi_all_bounds
+
 
 ## Absoulute Imports
 # from modules.utils.helper import *
@@ -139,7 +154,7 @@ class GibbsDiff2D(nn.Module):
     
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False, sampler_v2=False, is_debug=False, sup_residual=None):
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, return_chains=False, sampler_v2=False, is_debug=False, sup_residual=None):
 
         device = self.model.device
 
@@ -162,7 +177,7 @@ class GibbsDiff2D(nn.Module):
 
         # Initialize phi and sigma
         phi_init = sample_phi_prior(total_chains).unsqueeze(1)  # (B*C, 1)
-        sigma_init = get_noise_estimate_2d(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)  # (B*C, 1)
+        sigma_init = get_noise_estimate_2d(y).to(device).repeat(total_chains, 1)  # (B*C, 1)
     
         phi_init_all = torch.cat([phi_init, sigma_init], dim=1)  # (B*C, 2)
         # print('phi_init: ', phi_init_all, phi_init_all.shape)
@@ -172,7 +187,7 @@ class GibbsDiff2D(nn.Module):
         phi_init_denorm[:, 0] = unnormalize_phi(phi_init_denorm[:, 0])
         phi_all_denorm = [phi_init_denorm]
         
-        phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device)
+        phi_all_min, phi_all_max = get_phi_all_bounds(device=device)
         norm_phi_bounds = normalize_phi(torch.tensor([phi_all_min[0], phi_all_max[0]]))
         phi_all_min[0], phi_all_max[0] = norm_phi_bounds[0], norm_phi_bounds[1]
         
@@ -189,11 +204,14 @@ class GibbsDiff2D(nn.Module):
         step_size = None
         inv_mass_matrix = None
 
-        ##pre-filling
+       ##pre-filling
         ## prior(phi)
-        log_prior = lambda phi: log_prior_phi_sigma(phi[:, 0], phi[:, 1])
+        # log_prior = lambda phi: log_prior_phi_sigma(phi[:, 0], phi[:, 1])
+        log_prior = lambda phi: log_prior_phi_sigma(phi)
+        
         ## log-likelihood(eps|phi) 
-        log_likelihood = lambda phi, eps: log_likelihood_eps_phi_sigma(phi[:, 0], phi[:, 1], eps, ps_model)
+        # log_likelihood = lambda phi, eps: log_likelihood_eps_phi_sigma(phi[:, 0], phi[:, 1], eps, ps_model)
+        log_likelihood = lambda phi, eps: log_likelihood_eps_phi_sigma(phi, eps, ps_model)
 
         ## HMC-Sampler
         if sampler_v2:
@@ -244,6 +262,7 @@ class GibbsDiff2D(nn.Module):
                 logp = log_posterior(phi_clone, epsilon)
                 grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
                 
+                # return grad_phi
                 return logp.detach(), grad_phi
             
             def collision_manager(q, p, p_nxt):

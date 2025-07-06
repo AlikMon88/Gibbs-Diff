@@ -104,7 +104,6 @@ def log_likelihood_eps_phi_sigma(phi_all, eps, ps_model):
         raise ValueError("eps must be 2D (1D case) or 4D (image case)")
     
     log_likelihood = term_pi + term_logdet + term_x  # (b, dim)
-    # log_likelihood = log_likelihood.sum(dim=1)       # (b,) --> sum over the channel dim
     return log_likelihood
 
 
