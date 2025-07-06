@@ -78,7 +78,7 @@ class GibbsDiff2D(nn.Module):
         *,
         image_size,
         num_timesteps=1000,
-        hmc_chain_length = 30,
+        hmc_chain_length = 20,
         hmc_n_leapfrog_steps = 20,
         hmc_burnin_steps = 15,
         hmc_adapt_stepsize_iters = 12,
