@@ -63,7 +63,7 @@ def get_colored_noise_1d(shape, phi=0.0, device=None):
 
     # 3. Shape the spectrum (all tensors are on the correct device)
     S = S.pow(phi / 2)  # (B, L) via broadcasting
-    S = S / S.mean(dim=1, keepdim=True)  # Normalize
+    S = S / S.mean(dim=-1, keepdim=True)  # Normalize
 
     # 4. Generate white noise and shape it (all on the correct device)
     X_white = torch.fft.fft(torch.randn(B, L, device=device), dim=1)
@@ -162,10 +162,11 @@ def create_1d_data_colored_multi(n_samples=1000, n_depth=100, phi=1.0, decay=0.1
     elif sigma.shape != (n_samples, n_depth):
         raise ValueError(f"Incompatible sigma shape: got {sigma.shape}, expected scalar, (n_samples,), or (n_samples, n_depth)")
 
-    # Diffusion-style mixing
+    ## Diffusion-style mixing
     sqrt_one_minus_sigma2 = torch.sqrt(1.0 - sigma ** 2)
     observation = sqrt_one_minus_sigma2 * signal + sigma * noise
 
+    ## Linear-Mixing
     # observation = signal + noise
 
     return observation.cpu().numpy(), signal.cpu().numpy(), noise.cpu().numpy()

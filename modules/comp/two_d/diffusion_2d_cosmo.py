@@ -279,41 +279,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         # print('z_t: ', torch.min(z_t.reshape(1, -1)[0]), torch.max(z_t.reshape(1, -1)[0]))
         
         return z_t
-        
-        # --------------------------------------------
-        
-        # t_ddpm_batch = t_ddpm.repeat(z_t.shape[0]) # If z_t is batched
-
-        # predicted_ddpm_noise = self.model(z_t.float(), t_ddpm_batch.float(), phi_cmb=phi_cmb_cond)
-        
-        # alpha_t = self.alpha_t_ddpm[t_ddpm]
-        # alpha_bar_t = self.alpha_bar_t_ddpm[t_ddpm]
-        
-        # # x_{t-1} = 1/sqrt(alpha_t) * (x_t - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_theta) + sigma_t * z
-        # coeff1 = 1.0 / torch.sqrt(alpha_t)
-        # coeff2 = (1.0 - alpha_t) / torch.sqrt(1.0 - alpha_bar_t)
-        # mean_prev_t = coeff1 * (z_t - coeff2 * predicted_ddpm_noise)
-        
-        # variance_t = self.beta_t_ddpm[t_ddpm] # sigma_t^2 = beta_t
-        
-        # if is_phys:
-        #     ## secondary_mem sampling (based on supplied physical_index)
-        #     # CMB_maps, phi_cmb_batch = load_random_sample_from_disk_batch(CMB_SOURCE_PATH, PARAMS_SOURCE_PATH, sub_shape=self.image_size_hw, batch_size=batch_size)
-        #     phys_path = '/home/am3353/Gibbs-Diff/data/cosmo/created_data/cmb_maps'
-        #     phys_path = os.path.join(phys_path, f'cmb_{phys_idx}.fits')
-        #     noise_for_prev_step = enmap.read_map(phys_path)
-        #     noise_for_prev_step = cv2.resize(np.array(noise_for_prev_step), self.image_size_hw)
-        #     noise_for_prev_step = noise_for_prev_step.reshape(*z_t.shape)
-        #     # print(noise_for_prev_step.shape)
-        # else:
-        #     ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
-        #     pass
-            
-        # # noise_for_prev_step = torch.randn_like(z_t) if t_ddpm > 0 else torch.zeros_like(z_t)
-        # z_prev_t = mean_prev_t + torch.sqrt(variance_t) * noise_for_prev_step
-        
-        # return z_prev_t
-
+       
     @torch.no_grad()
     def sample_dust_posterior(self, y_observed_cmb_corrupted, # The actual observation [B_orig,C,H,W]
                               phi_cmb_current_estimate,     # Current Phi_CMB [B_chains, 3] | (sigma, H0, ombh2)
@@ -376,23 +342,7 @@ class GibbsDiff2D_cosmo(nn.Module):
             else:
                 return torch.mean(torch.norm(noisy_batch - batch_origin, dim=(-3, -2, -1))), None
 
-        ## ------------------------------------------------------------
-        
-        # max_t_eff = torch.max(t_eff_indices).item()
-        # current_z = z_t_eff
-
-        # for t_val_ddpm in range(max_t_eff, -1, -1): # from max_t_eff down to 0
-        #     t_tensor = torch.tensor(t_val_ddpm, device=self.device)
-            
-        #     # Create a mask for which chains are still active at this t_val_ddpm
-        #     active_mask = (t_eff_indices >= t_val_ddpm).float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-            
-        #     if torch.sum(active_mask) > 0: # If any chain is active
-        #         z_prev_t = self.denoise_1step_ancestral(current_z, t_tensor, phi_cmb_cond=phi_cmb_current_estimate[:, 1:], is_phys=is_phys, phys_idx=phys_idx)
-        #         current_z = active_mask * z_prev_t + (1.0 - active_mask) * current_z # Update only active chains
-            
-        # return current_z # This is the sampled x_k (dust map)
-
+      
     def run_gibbs_sampler(self,
                             y_observed, # Single observation or batch [B_orig, C, H, W]
                             num_chains_per_gibbs_sample, # Number of parallel MCMC chains for Phi_CMB
@@ -514,8 +464,8 @@ class GibbsDiff2D_cosmo(nn.Module):
                             allow_unused=True # If some inputs don't affect output
                         )[0][valid_grads_mask] # Extract grad for valid inputs
 
-                return grad_phi.detach() # Detach as HMC doesn't need graph for phi_new
-
+                return logp_val.detach(), grad_phi # Detach as HMC doesn't need graph for phi_new
+            
             # Determine if HMC step size adaptation is needed
             adapt_step_size, adapt_mass_matrix = False, False
             current_n_adapt_hmc = 0
@@ -541,22 +491,7 @@ class GibbsDiff2D_cosmo(nn.Module):
                 phi_max_bounds=phi_max_bounds
             )
             lt = time.time()
-            # print('time-taken (HMC): ', (lt - ft)/60, ' mins')
-            
-            ''' Posterior-Distribution Problem'''
-            # # sample_hmc_v2 returns the last sample.
-            # # If chain_length > 1, phi_cmb_new would be [B_total, chain_length_hmc, 3]
-            # # We want the last sample from the HMC chain.
-            # if phi_cmb_new.ndim == 3 and phi_cmb_new.shape[1] == self.hmc_chain_length:
-            #     phi_cmb_current = phi_cmb_new[:, -1, :].detach() # Take last HMC sample
-            # elif phi_cmb_new.ndim == 2: # if chain_length was 1
-            #     phi_cmb_current = phi_cmb_new.detach()
-            # else:
-            #     raise ValueError("Unexpected shape from HMC sampler for phi_cmb_new")
 
-            # print('phi_cmb_current: ', phi_cmb_current.shape)
-            # print('phi_cmb_new', phi_cmb_new.shape)
-       
             phi_cmb_current = phi_cmb_new.detach()
 
             # Update HMC step size and inv mass matrix if they were adapted

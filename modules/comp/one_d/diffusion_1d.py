@@ -26,10 +26,16 @@ from ...utils.noise_create import get_colored_noise_1d
 # from ...utils.hmc import get_phi_all_bounds
 
 ## HMC-verison2
-from ...utils.hmc_v2 import *
-from ...utils.hmc_v2 import get_noise_estimate_1d, get_noise_estimate_2d
-from ...utils.hmc_v2 import sample_hmc_v2
-from ...utils.hmc_v2 import get_phi_all_bounds
+# from ...utils.hmc_v2 import *
+# from ...utils.hmc_v2 import get_noise_estimate_1d, get_noise_estimate_2d
+# from ...utils.hmc_v2 import sample_hmc_v2
+# from ...utils.hmc_v2 import get_phi_all_bounds
+
+## HMC-version3
+from ...utils.hmc_v3 import *
+from ...utils.hmc_v3 import get_noise_estimate_1d, get_noise_estimate_2d
+from ...utils.hmc_v3 import get_phi_all_bounds
+
 
 from torch.cuda.amp import autocast
 import sys
@@ -83,10 +89,10 @@ class GibbsDiff1D(nn.Module):
         self.alpha_t = 1 - self.beta_t
         self.alpha_bar_t = torch.cumprod(self.alpha_t, dim=0) 
 
-        self.n_leapfrog_steps = 20 
-        self.chain_length =  150
-        self.burnin_steps = 80
-        self.n_adapt = 60
+        self.n_leapfrog_steps = 30 
+        self.chain_length =  50
+        self.burnin_steps = 30
+        self.n_adapt = 25
 
         if not sampling_timesteps:
             self.sampling_timesteps = self.num_timesteps
@@ -147,7 +153,7 @@ class GibbsDiff1D(nn.Module):
     
     ## y - not t-indexed noisy image and yt - normalized t-indexed noisy image | we don't use pytorch grad_calculate
     ## SIMPLE GIBBS SAMPLER + HMC EXECUTION
-    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, sigma_min=0.04, sigma_max=0.4, return_chains=False, sampler_v2=False, is_debug=False, sup_residual=None):
+    def run_gibbs_sampler(self, y, yt, num_chains_per_sample, n_it_gibbs=5, n_it_burnin=1, return_chains=False, sampler_v2=False, is_debug=False, sup_residual=None):
 
         device = self.model.device
         ps_model = ColoredPowerSpectrum1D(device=device)
@@ -166,7 +172,7 @@ class GibbsDiff1D(nn.Module):
         # Initialize phi and sigma
         phi_init = sample_phi_prior(total_chains).unsqueeze(1)  # (B*C, 1)
         ## high-freq component capture using low-pass filter
-        sigma_init = get_noise_estimate_1d(y, sigma_min, sigma_max).to(device).repeat(total_chains, 1)  # (B*C, 1)
+        sigma_init = get_noise_estimate_1d(y).to(device).repeat(total_chains, 1)  # (B*C, 1)
     
         phi_init_all = torch.cat([phi_init, sigma_init], dim=1)  # (B*C, 2)
         # print('phi_init: ', phi_init_all, phi_init_all.shape)
@@ -176,7 +182,7 @@ class GibbsDiff1D(nn.Module):
         phi_init_denorm[:, 0] = unnormalize_phi(phi_init_denorm[:, 0])
         phi_all_denorm = [phi_init_denorm]
         
-        phi_all_min, phi_all_max = get_phi_all_bounds(phi_min, phi_max, sigma_min, sigma_max, device)
+        phi_all_min, phi_all_max = get_phi_all_bounds(device=device)
         norm_phi_bounds = normalize_phi(torch.tensor([phi_all_min[0], phi_all_max[0]]))
         phi_all_min[0], phi_all_max[0] = norm_phi_bounds[0], norm_phi_bounds[1]
         
@@ -242,6 +248,7 @@ class GibbsDiff1D(nn.Module):
 
             # Step 2: HMC Sampling
             def log_posterior(phi, epsilon):
+        
                 # print('log_posterior-phi: ', phi)
                 return log_likelihood(phi, epsilon) + log_prior(phi)
 
@@ -249,35 +256,61 @@ class GibbsDiff1D(nn.Module):
             log_prob_fn = lambda phi: log_posterior(phi, epsilon)
 
             def gradient_log_prob(phi):
+        
                 # print('gradient_log_prob: ', phi)
                 phi_clone = phi.clone().requires_grad_(True)
                 logp = log_posterior(phi_clone, epsilon)
-                
+         
                 # print('logp: ', logp)
                 
                 grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
                 
                 # print('grad_phi: ', grad_phi)
                 
-                return grad_phi.detach()
+                ## don't  detach gradients
+                # return grad_phi 
+                return logp.detach(), grad_phi
 
-            if i == 0: ## first-gibbs-step-adaption
-                # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, adapt=True)
-                phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.01, inv_mass_matrix=None, adapt=True)
+            def collision_manager(q, p, p_nxt):
+                p_ret = p_nxt
+                for i in range(2):
+                    crossed_min_boundary = q[..., i] < phi_all_min[i]
+                    crossed_max_boundary = q[..., i] > phi_all_max[i]
+                    # Reflecting boundary conditions
+                    p_ret[..., i][crossed_min_boundary] = -p[..., i][crossed_min_boundary]
+                    p_ret[..., i][crossed_max_boundary] = -p[..., i][crossed_max_boundary]
+                return p_ret
+        
+            # ''' HMC-Version-1/2 '''
+            # if i == 0: ## first-gibbs-step-adaption
+            #     # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, n_leapfrog_steps=self.n_leapfrog_steps, chain_length=self.chain_length, burnin_steps=self.burnin_steps, adapt=True)
+            #     phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.01, inv_mass_matrix=None, adapt=True)
                 
-                # print('phi_new-gibbs-initial: ', phi_new)
-                # print('step_size: ', step_size)
+            #     # print('phi_new-gibbs-initial: ', phi_new)
+            #     # print('step_size: ', step_size)
            
-            else:
-                # phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
-                phi_new, hmc_accept_mean = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
-                hmc_accept_list.append(hmc_accept_mean)
+            # else:
+            #     # phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+            #     phi_new, hmc_accept_mean = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+            #     hmc_accept_list.append(hmc_accept_mean)
                 
-                # print('phi_new-gibbs: ', phi_new)
-            
+            ''' HMC-Version-3 '''
+            if i == 0:
+                hmc = HMC(log_prob_fn, log_prob_and_grad=gradient_log_prob)
+                hmc.set_collision_fn(collision_manager)
+
+                phi_new = hmc.sample(phi, nsamples=1, burnin=10, step_size=1e-5, nleap=(5, 35), epsadapt=300, verbose=False, ret_side_quantities=False)[:, 0, :].detach()
+                step_size = hmc.step_size
+                inv_mass_matrix = hmc.mass_matrix_inv
+            else:
+                hmc = HMC(log_prob_fn, log_prob_and_grad=gradient_log_prob)
+                hmc.set_collision_fn(collision_manager)
+                hmc.set_inv_mass_matrix(inv_mass_matrix, batch_dim=True)
+                phi_new = hmc.sample(phi, nsamples=1, burnin=10, step_size=step_size, nleap=(5, 35), epsadapt=0, verbose=False)[:, 0, :].detach()
+
+            phi_all.append(phi_new)
             phi_denorm = phi_new.clone()
             phi_denorm[:, 0] = unnormalize_phi(phi_denorm[:, 0])
-            phi_all.append(phi_new)
             
             # print('Gibbs (phi_norm)')
             # print(phi_new)
@@ -289,22 +322,22 @@ class GibbsDiff1D(nn.Module):
             x_all.append(x)
         
         ## After phi distrib convergence
-        print('HMC-last-state-Acceptance-Probability: ', hmc_accept_mean)
-        print('HMC-mean-accept-proba: ', np.mean(np.array(hmc_accept_list), axis=0))
+        # print('HMC-last-state-Acceptance-Probability: ', hmc_accept_mean)
+        # print('HMC-mean-accept-proba: ', np.mean(np.array(hmc_accept_list), axis=0))
 
         if return_chains:
             ## returns the entire gibbs chain
-            return torch.stack(phi_all_denorm, dim=1).detach().cpu(), torch.stack(x_all, dim=1).detach().cpu()  # (B*C, steps, ...)
+            return torch.stack(phi_all_denorm, dim=1).detach().cpu(), torch.stack(phi_all, dim=1).detach().cpu(), torch.stack(x_all, dim=1).detach().cpu()  # (B*C, steps, ...)
         else:
             ## returns the last gibbs state 
-            return phi_all_denorm[-1].detach().cpu(), x_all[-1].detach().cpu()
+            return phi_all_denorm[-1].detach().cpu(), phi_all[-1].detach().cpu(), x_all[-1].detach().cpu()
 
     ## there are 2 MCMC (HMC and Gibbs) chains we talk about the gibbs chain ofc 
-    def blind_posterior_mean(self,y, yt, norm_phi_mode='compact', num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False, sampler_v2=False, is_debug=False, sup_residual=None): ## last avg_pmean positions
+    def blind_posterior_mean(self, y, yt, num_chains_per_sample=5, n_it_gibbs=5, n_it_burnin=1, avg_pmean=2, return_post=False, sampler_v2=False, is_debug=False, sup_residual=None): ## last avg_pmean positions
         
         '''Performs blind denoising with the posterior mean estimator. | Run Multiple MCMC chains'''
 
-        phi_all, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True, sampler_v2=sampler_v2, is_debug=False, sup_residual=None)
+        phi_all, phi_all_denorm, x_all = self.run_gibbs_sampler(y, yt, num_chains_per_sample=num_chains_per_sample, n_it_gibbs=n_it_gibbs, n_it_burnin=n_it_burnin, return_chains=True, sampler_v2=sampler_v2, is_debug=False, sup_residual=None)
         
         # The multi-MCMC chain posterior -> (#chains, batch_size, chain_length (taking last avg_mean states), channel_depth, seq_len) 
         # We take a mean over #chains & avg_mean chain_len --> (batch_size, channel, seq_len)

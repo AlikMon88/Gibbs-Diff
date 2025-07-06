@@ -240,29 +240,48 @@ class GibbsDiff2D(nn.Module):
             log_prob_fn = lambda phi: log_posterior(phi, epsilon)
 
             def gradient_log_prob(phi):
-
                 phi_clone = phi.clone().requires_grad_(True)
                 logp = log_posterior(phi_clone, epsilon)
-                # print('logp:')
-                # print(type(logp), logp.shape, logp)
-                # print('logp.requires_grad:', logp.requires_grad)
-                # print('logp.grad_fn:', logp.grad_fn)
                 grad_phi = torch.autograd.grad(logp, phi_clone, grad_outputs=torch.ones_like(logp))[0]
-                return grad_phi.detach()
-
-            if i == 0:
-                # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
-                phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.01, inv_mass_matrix=None, adapt=True)
-                 
-            else:
-                # phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
-                phi_new, hmc_accept_mean = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
-                hmc_accept_list.append(hmc_accept_mean)
                 
+                return logp.detach(), grad_phi
+            
+            def collision_manager(q, p, p_nxt):
+                p_ret = p_nxt
+                for i in range(2):
+                    crossed_min_boundary = q[..., i] < phi_all_min[i]
+                    crossed_max_boundary = q[..., i] > phi_all_max[i]
+                    # Reflecting boundary conditions
+                    p_ret[..., i][crossed_min_boundary] = -p[..., i][crossed_min_boundary]
+                    p_ret[..., i][crossed_max_boundary] = -p[..., i][crossed_max_boundary]
+                return p_ret
 
+            # if i == 0:
+            #     # phi_new, step_size, inv_mass_matrix = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, adapt=True)
+            #     phi_new, step_size, inv_mass_matrix, _ = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=0.01, inv_mass_matrix=None, adapt=True)
+                 
+            # else:
+            #     # phi_new = sample_hmc(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+            #     phi_new, hmc_accept_mean = hmc_prefill(log_prob_fn=log_prob_fn, log_grad=gradient_log_prob, phi_init=phi, step_size=step_size, inv_mass_matrix=inv_mass_matrix, adapt=False)
+            #     hmc_accept_list.append(hmc_accept_mean)
+                
+            ''' HMC-Version3 '''
+            if i == 0:
+                hmc = HMC(log_prob_fn, log_prob_and_grad=gradient_log_prob)
+                hmc.set_collision_fn(collision_manager)
+
+                phi_new = hmc.sample(phi, nsamples=1, burnin=10, step_size=1e-5, nleap=(5, 35), epsadapt=300, verbose=False, ret_side_quantities=False)[:, 0, :].detach()
+                step_size = hmc.step_size
+                inv_mass_matrix = hmc.mass_matrix_inv
+            else:
+                hmc = HMC(log_prob_fn, log_prob_and_grad=gradient_log_prob)
+                hmc.set_collision_fn(collision_manager)
+                hmc.set_inv_mass_matrix(inv_mass_matrix, batch_dim=True)
+                phi_new = hmc.sample(phi, nsamples=1, burnin=10, step_size=step_size, nleap=(5, 35), epsadapt=0, verbose=False)[:, 0, :].detach()
+
+            phi_all.append(phi_new)
             phi_denorm = phi_new.clone()
             phi_denorm[:, 0] = unnormalize_phi(phi_denorm[:, 0])
-            phi_all.append(phi_new)
             
             # print('Gibbs (phi_norm)')
             # print(phi_new)
@@ -274,8 +293,8 @@ class GibbsDiff2D(nn.Module):
             x_all.append(x)
         
         ## After phi distrib convergence
-        print('HMC-last-state-Acceptance-Probability: ', hmc_accept_mean)
-        print('HMC-mean-accept-proba: ', np.mean(np.array(hmc_accept_list), axis=0))
+        # print('HMC-last-state-Acceptance-Probability: ', hmc_accept_mean)
+        # print('HMC-mean-accept-proba: ', np.mean(np.array(hmc_accept_list), axis=0))
 
         if return_chains:
             ## returns the entire gibbs chain

@@ -81,7 +81,7 @@ def get_colored_noise_2d(shape, phi=0, device=None):
     S[:, :, 0, 0] = 1.0  # Avoid division by zero at DC
 
     # Normalize power spectrum
-    S /= S.mean(dim=(-2, -1), keepdim=True)
+    S /= S.mean(dim=(-1, -2), keepdim=True)
 
     # Generate white noise in frequency domain
     X_white = torch.fft.fftn(torch.randn(shape, device=device), dim=(2, 3))

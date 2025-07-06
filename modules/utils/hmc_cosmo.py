@@ -442,38 +442,38 @@ def sample_hmc_cosmo(log_prob_fn, log_grad_fn, # For target q (Phi_CMB)
                 # Here, num_burnin_steps_hmc acts as total_adapt_steps for this HMC call
                 current_step_sizes_per_chain = step_size_adapter.update(accept_prob.mean(dim=0).item())
 
-            if adapt_mass_matrix:
-                q_collected_for_adapt_M.append(q.clone().detach())
-                # Adapt M at specified point, e.g., 3/4 of HMC burn-in
-                # This schedule needs to be robust.
-                if num_burnin_steps_hmc > dim_phi and i_iter == (3 * num_burnin_steps_hmc) // 4 :
-                    if len(q_collected_for_adapt_M) > dim_phi: # Need enough samples
-                        # Use a window of recent samples
-                        window_start = max(0, len(q_collected_for_adapt_M) - num_burnin_steps_hmc // 2)
-                        samples_for_M = torch.stack(q_collected_for_adapt_M[window_start:], dim=0) # [N_collected, B_chains, D_phi]
-                        # Average over chains or estimate per chain if M is per chain
-                        # For shared M, average samples across chains then compute covariance:
-                        # samples_for_M_flat = samples_for_M.transpose(0,1).reshape(-1, dim_phi) # [N_coll*B_chains, D_phi]
-                        # estimated_M = torch.cov(samples_for_M_flat.T) + torch.eye(dim_phi,device=device)*1e-6 # [D_phi,D_phi]
+            # if adapt_mass_matrix:
+            #     q_collected_for_adapt_M.append(q.clone().detach())
+            #     # Adapt M at specified point, e.g., 3/4 of HMC burn-in
+            #     # This schedule needs to be robust.
+            #     if num_burnin_steps_hmc > dim_phi and i_iter == (3 * num_burnin_steps_hmc) // 4 :
+            #         if len(q_collected_for_adapt_M) > dim_phi: # Need enough samples
+            #             # Use a window of recent samples
+            #             window_start = max(0, len(q_collected_for_adapt_M) - num_burnin_steps_hmc // 2)
+            #             samples_for_M = torch.stack(q_collected_for_adapt_M[window_start:], dim=0) # [N_collected, B_chains, D_phi]
+            #             # Average over chains or estimate per chain if M is per chain
+            #             # For shared M, average samples across chains then compute covariance:
+            #             # samples_for_M_flat = samples_for_M.transpose(0,1).reshape(-1, dim_phi) # [N_coll*B_chains, D_phi]
+            #             # estimated_M = torch.cov(samples_for_M_flat.T) + torch.eye(dim_phi,device=device)*1e-6 # [D_phi,D_phi]
                         
-                        # For batched M (per chain):
-                        estimated_M_batched = torch.zeros_like(current_M) if current_M is not None else torch.eye(dim_phi, device=device).unsqueeze(0).repeat(num_chains,1,1)
-                        any_M_updated = False
-                        for chain_idx in range(num_chains):
-                            chain_samples = samples_for_M[:, chain_idx, :] # [N_collected, D_phi]
-                            if chain_samples.shape[0] > dim_phi : # Ensure enough samples per chain
-                                cov_matrix = torch.cov(chain_samples.T)
-                                # Ensure positive definiteness
-                                cov_matrix += torch.eye(dim_phi, device=device) * 1e-6 
-                                estimated_M_batched[chain_idx] = cov_matrix
-                                any_M_updated = True
+            #             # For batched M (per chain):
+            #             estimated_M_batched = torch.zeros_like(current_M) if current_M is not None else torch.eye(dim_phi, device=device).unsqueeze(0).repeat(num_chains,1,1)
+            #             any_M_updated = False
+            #             for chain_idx in range(num_chains):
+            #                 chain_samples = samples_for_M[:, chain_idx, :] # [N_collected, D_phi]
+            #                 if chain_samples.shape[0] > dim_phi : # Ensure enough samples per chain
+            #                     cov_matrix = torch.cov(chain_samples.T)
+            #                     # Ensure positive definiteness
+            #                     cov_matrix += torch.eye(dim_phi, device=device) * 1e-6 
+            #                     estimated_M_batched[chain_idx] = cov_matrix
+            #                     any_M_updated = True
                         
-                        if any_M_updated:
-                            current_M = estimated_M_batched.detach()
-                            inv_mass_matrix_M_inv = compute_inverse_mass_from_M(current_M)
-                            mass_matrix_M_sqrt = compute_mass_matrix_sqrt_from_M(current_M)
-                            if verbose: print(f"HMC Iter {i_iter}: Mass matrix M updated.")
-                        q_collected_for_adapt_M = [] # Reset
+            #             if any_M_updated:
+            #                 current_M = estimated_M_batched.detach()
+            #                 inv_mass_matrix_M_inv = compute_inverse_mass_from_M(current_M)
+            #                 mass_matrix_M_sqrt = compute_mass_matrix_sqrt_from_M(current_M)
+            #                 if verbose: print(f"HMC Iter {i_iter}: Mass matrix M updated.")
+            #             q_collected_for_adapt_M = [] # Reset
         
         # Collect samples after HMC burn-in
         if i_iter >= num_burnin_steps_hmc:

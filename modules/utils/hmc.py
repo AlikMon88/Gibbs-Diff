@@ -409,19 +409,19 @@ import torch.nn.functional as F
 
 # --- Constants and Configuration ---
 # Physical range for the spectral index phi
-PHI_MIN_PHYSICAL = -1.0
-PHI_MAX_PHYSICAL = 1.0
+PHI_MIN = -1.0
+PHI_MAX = 1.0
 
 # Prior range for the noise amplitude sigma
-SIGMA_MIN = 0.04
-SIGMA_MAX = 0.4
+SIGMA_MIN = 1e-3
+SIGMA_MAX = 1.0
 
 # Small constant for numerical stability
-EPSILON_CONST = 1e-9
+EPSILON_CONST = 1e-6
 
 # --- Normalization Utilities ---
 
-def get_phi_all_bounds(phi_min=PHI_MIN_PHYSICAL, phi_max=PHI_MAX_PHYSICAL, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX, device = 'cpu'):
+def get_phi_all_bounds(phi_min=PHI_MIN, phi_max=PHI_MAX, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX, device = 'cpu'):
     phi_min = torch.tensor([phi_min], device=device)
     phi_max = torch.tensor([phi_max], device=device)
     sigma_min = torch.tensor([sigma_min], device=device)
@@ -431,7 +431,7 @@ def get_phi_all_bounds(phi_min=PHI_MIN_PHYSICAL, phi_max=PHI_MAX_PHYSICAL, sigma
     phi_max_all = torch.cat([phi_max, sigma_max])
     return phi_min_all, phi_max_all
 
-def get_noise_estimate_2d(y, sigma_min, sigma_max):
+def get_noise_estimate_2d(y, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MIN):
     y_std = y.std()
     sigma_est = 1.15 * y_std - 0.17  # heuristic from Imagenet
     sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
@@ -446,89 +446,72 @@ def high_pass_filter(y, kernel_size=31):
     high_pass = y - low_pass
     return high_pass.squeeze()
 
-def get_noise_estimate_1d(y, sigma_min, sigma_max, kernel_size=31):
+def get_noise_estimate_1d(y, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MIN, kernel_size=31):
     high_freq_part = high_pass_filter(y, kernel_size)
     sigma_est = high_freq_part.std()
     sigma_est = torch.clamp(sigma_est, sigma_min * 1.05, sigma_max * 0.95)
     return sigma_est.unsqueeze(0)
 
-def sample_phi_prior(n, phi_min=PHI_MIN_PHYSICAL, phi_max=PHI_MAX_PHYSICAL, norm_mode='compact'):
+def sample_phi_prior(n, phi_min=PHI_MIN, phi_max=PHI_MAX):
     phi = torch.rand(n) * (phi_max - phi_min) + phi_min
     return normalize_phi(phi)
 
-def normalize_phi(phi_physical, phi_max=PHI_MAX_PHYSICAL, phi_min=PHI_MIN_PHYSICAL):
+def normalize_phi(phi, phi_max=PHI_MAX, phi_min=PHI_MIN):
     """Maps a physical phi from [phi_min, phi_max] to the internal [0, 1] range."""
-    return (phi_physical - phi_min) / (phi_max - phi_min)
+    return (phi - phi_min) / (phi_max - phi_min)
 
-def unnormalize_phi(phi_normalized, phi_max=PHI_MAX_PHYSICAL, phi_min=PHI_MIN_PHYSICAL):
+def unnormalize_phi(phi_normalized, phi_max=PHI_MAX, phi_min=PHI_MIN):
     """Maps an internal phi from [0, 1] back to its physical [phi_min, phi_max] range."""
     return phi_normalized * (phi_max - phi_min) + phi_min
 
 # --- Likelihood and Prior Functions ---
 
-def log_prior_phi_sigma(phi_all, phi_min_norm=0.0, phi_max_norm=1.0,
-                        sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX):
-    """
-    Robust log prior for the combined state vector [phi_normalized, sigma].
-    phi_all: Tensor of shape [B, 2], where column 0 is normalized phi, column 1 is sigma.
-    """
-    device = phi_all.device
+def log_prior_phi_sigma(phi_all, sigma_min=SIGMA_MIN, sigma_max=SIGMA_MAX):
     
-    # Create min and max bound vectors for the state vector
-    mins = torch.tensor([phi_min_norm, sigma_min], device=device, dtype=phi_all.dtype)
-    maxs = torch.tensor([phi_max_norm, sigma_max], device=device, dtype=phi_all.dtype)
+    # Unpack parameters
+    phi = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
+    sigma = phi_all[:, 1].unsqueeze(-1) # Shape [B, 1]
 
-    # Check if all parameters are within their respective bounds using broadcasting
-    # (phi_all >= mins) compares a [B, 2] tensor with a [2] tensor -> [B, 2] boolean
-    in_bounds_mask = torch.all((phi_all >= mins) & (phi_all <= maxs), dim=-1) # Reduces to [B]
-    
-    # Return 0.0 for in-bounds, -inf for out-of-bounds
-    return torch.where(in_bounds_mask, 0.0, -torch.inf)
+    logp = torch.log(torch.logical_and(phi[..., 0] >= 0.0, phi[..., 0] <= 1.0).float()) #gives either 0 or -inf
+    for i in range(1, phi.shape[-1]):
+        logp += torch.log(torch.logical_and(phi[..., i] >= 0.0, phi[..., i] <= 1.0).float())
+
+    logp += torch.log(torch.logical_and(sigma >= sigma_min, sigma <= sigma_max).float()).squeeze(-1)
+    return logp
 
 
 def log_likelihood_eps_phi_sigma(phi_all, eps, ps_model):
-    """
-    Calculates the log likelihood log p(eps | phi_all).
-    phi_all: Tensor of shape [B, 2], where col 0 is norm_phi, col 1 is sigma.
-    eps: Tensor of noise residuals, shape [B, C, ...]
-    ps_model: The power spectrum model (e.g., ColoredPowerSpectrum2D)
-    """
     
     # Unpack parameters
-    phi_normalized = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
+    phi = phi_all[:, 0].unsqueeze(-1) # Shape [B, 1]
     sigma = phi_all[:, 1].unsqueeze(-1)         # Shape [B, 1]
-
-    # Get the base power spectrum (normalized to mean 1)
-    # The ps_model expects a normalized phi in [0,1]
-    ps_base = ps_model(phi_normalized)
-
-    # Scale the power spectrum by sigma^2 and add a regularizer for stability
-    if eps.ndim == 3: # 1D case
-        sigma_reshaped = sigma.view(-1, 1, 1)
-    elif eps.ndim == 4: # 2D case
-        sigma_reshaped = sigma.view(-1, 1, 1, 1)
-    else:
-        raise ValueError("eps must be 3D (1D case) or 4D (image case)")
     
-    # Add regularizer INSIDE log and BEFORE division
-    scaled_ps = (sigma_reshaped**2 * ps_base) + EPSILON_CONST
+    ps = ps_model(phi)
 
-    # FFT of the residual
-    if eps.ndim == 3:
-        xf = torch.fft.fft(eps)
-        sum_dims = -1
+    if eps.ndim == 3:  # 1D case
         eps_dim = eps.shape[-1]
-    else: # 4D
-        xf = torch.fft.fft2(eps)
-        sum_dims = (-2, -1)
-        eps_dim = eps.shape[-2] * eps.shape[-1]
+        xf = torch.fft.fft(eps)
+        sigma = sigma.view(-1, 1) if sigma.ndim == 1 else sigma  # (B, 1)
+        scaled_ps = sigma**2 * ps
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=(-1, -2))
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=(-1, -2)) / eps_dim
 
-    # Calculate log-likelihood terms
-    term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=sum_dims)
-    term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=sum_dims) / eps_dim # Normalization by N
+    elif eps.ndim == 4:  # 2D image case
+        H, W = eps.shape[-2], eps.shape[-1]
+        eps_dim = H * W
+        xf = torch.fft.fft2(eps)
+        sigma = sigma.view(-1, 1, 1, 1) if sigma.ndim == 1 else sigma
+        scaled_ps = sigma**2 * ps
+        term_pi = -(eps_dim / 2) * np.log(2 * np.pi)
+        term_logdet = -0.5 * torch.sum(torch.log(scaled_ps), dim=(-1, -2, -3))
+        term_x = -0.5 * torch.sum(torch.abs(xf).pow(2) / scaled_ps, dim=(-1, -2, -3)) / eps_dim
+
+    else:
+        raise ValueError("eps must be 2D (1D case) or 4D (image case)")
     
-    # Sum over channel dimension if it exists
-    log_likelihood = (term_logdet + term_x).sum(dim=1)
+    log_likelihood = term_pi + term_logdet + term_x  # (b, dim)
+    # log_likelihood = log_likelihood.sum(dim=1)       # (b,) --> sum over the channel dim
     return log_likelihood
 
 
@@ -744,7 +727,7 @@ def sample_hmc(log_prob_fn, log_grad_fn, q_init, step_size=0.01, n_leapfrog_step
         u = torch.rand(batch_size, device=device)
         accept_mask = u < accept_prob
         
-        q[accept_mask] = q_new[accept_mask].detach() # Update state
+        q[accept_mask.squeeze(-1)] = q_new[accept_mask.squeeze(-1)].detach() # Update state
 
         # print('Accepted-State: ', q)
         
