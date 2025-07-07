@@ -240,31 +240,15 @@ class GibbsDiff2D_cosmo(nn.Module):
                 
                 noise = np.random.normal(loc=0.0, scale=1e-1, size=z.shape) ## forceful noise injection | NOT correlated with the power spectrum of the CMB map 
                 z = z + noise ## Reduced Correlation
-                
                 z = (z - np.mean(z)) / np.std(z)                
-                
-                # print('z: ', min(np.ravel(z)), max(np.ravel(z)))
-                
-                # fig = plt.figure(figsize=(5, 5))
-                # plt.imshow(z.reshape(*self.image_size_hw, -1), cmap='coolwarm')
-                # plt.show()
-                
                 z = z.reshape(*z_t.shape)
             
             else:
                 ## Dynamic-Data Creation (use fot blind-denoising (conti-space))
-                # print('H0: ', phi_cmb_cond[:, 0], 'ombh2: ', phi_cmb_cond[:, 1])
                 cls_tt_sample = get_camb_cls(H0=phi_cmb_cond[:, 0], ombh2=phi_cmb_cond[:, 1])
                 z = generate_cmb_map(cls_tt_sample, sigma_cmb_amp=None, seed=None) ## seed=None for non-deterministic
                 z = cv2.resize(np.array(z), self.image_size_hw)
                 z = (z - np.mean(z)) / np.std(z)                
-
-                # print('z: ', min(np.ravel(z)), max(np.ravel(z)))
-            
-                # fig = plt.figure(figsize=(5, 5))
-                # plt.imshow(z.reshape(*self.image_size_hw, -1), cmap='coolwarm')
-                # plt.show()
-            
                 z = z.reshape(*z_t.shape)
         else:
             z = 0
@@ -377,6 +361,7 @@ class GibbsDiff2D_cosmo(nn.Module):
         else:
             # Sample from prior or a smarter initialization
             s_init = torch.rand(1, 1, device=device) * (SIGMA_CMB_PRIOR_MAX - SIGMA_CMB_PRIOR_MIN) + SIGMA_CMB_PRIOR_MIN
+            # s_init = torch.tensor([0.4]).reshape(*s_init.shape)
             s_init = s_init.repeat(total_chains, 1)
 
             h_init = torch.rand(1, 1, device=device) * (H0_PRIOR_MAX - H0_PRIOR_MIN) + H0_PRIOR_MIN
@@ -403,8 +388,13 @@ class GibbsDiff2D_cosmo(nn.Module):
              current_hmc_inv_mass_matrix = torch.eye(3, device=device).unsqueeze(0).repeat(total_chains, 1, 1) # Diagonal or per chain
 
         phi_min_bounds, phi_max_bounds = get_phi_cmb_parameter_bounds(device=device)
-
-
+        
+        print('Physical-Phi-CMB: ', phi_min_bounds, phi_max_bounds)
+        
+        phi_min_bounds, phi_max_bounds = normalize_phi_cmb(phi_min_bounds), normalize_phi_cmb(phi_max_bounds)
+        
+        print('Normalized-Phi-CMB: ', phi_min_bounds, phi_max_bounds)
+        
         for gibbs_iter in tqdm(range(n_it_gibbs + n_it_burnin_gibbs), desc="Gibbs Iterations"):
             
             # --- Step 1: Sample Dust Map x_k ~ q(x | y, Phi_CMB_{k-1}) ---
@@ -412,7 +402,7 @@ class GibbsDiff2D_cosmo(nn.Module):
             ft = time.time()
             if is_debug and sup_residual is not None:
                 # print(' --- Bypassing - (DDPM) ---')
-                estimated_cmb_residual = sup_residual
+                estimated_cmb_residual = sup_residual.repeat_interleave(num_chains_per_gibbs_sample, dim=0).to(device)
                 var_eps = torch.mean(torch.var(estimated_cmb_residual, dim=-1))
                 sampled_x_dust = y_repeated - estimated_cmb_residual
                 
@@ -464,7 +454,8 @@ class GibbsDiff2D_cosmo(nn.Module):
                             allow_unused=True # If some inputs don't affect output
                         )[0][valid_grads_mask] # Extract grad for valid inputs
 
-                return logp_val.detach(), grad_phi # Detach as HMC doesn't need graph for phi_new
+                return logp_val.detach(), grad_phi
+                # return grad_phi # Detach as HMC doesn't need graph for phi_new
             
             # Determine if HMC step size adaptation is needed
             adapt_step_size, adapt_mass_matrix = False, False
@@ -474,30 +465,58 @@ class GibbsDiff2D_cosmo(nn.Module):
                  current_n_adapt_hmc = self.hmc_adapt_stepsize_iters // n_it_burnin_gibbs # Distribute adaptation
                  if gibbs_iter == 0: current_n_adapt_hmc = self.hmc_adapt_stepsize_iters # Full adapt on first iter
 
+            def collision_manager(q, p, p_nxt):
+                p_ret = p_nxt
+                for i in range(q.shape[-1]):
+                    crossed_min_boundary = q[..., i] < phi_min_bounds[i]
+                    crossed_max_boundary = q[..., i] > phi_max_bounds[i]
+                    # Reflecting boundary conditions
+                    p_ret[..., i][crossed_min_boundary] = -p[..., i][crossed_min_boundary]
+                    p_ret[..., i][crossed_max_boundary] = -p[..., i][crossed_max_boundary]
+                return p_ret
+
             ft = time.time()
-            phi_cmb_new, hmc_step_size_new, hmc_inv_mass_new, _ = sample_hmc_cosmo(
-                log_prob_fn=hmc_log_posterior_fn,
-                log_grad_fn=hmc_gradient_log_posterior_fn,
-                phi_init=phi_cmb_current.detach(), # Start HMC from current Phi_CMB
-                mass_matrix_M_input=None if current_hmc_inv_mass_matrix is None else torch.linalg.inv(current_hmc_inv_mass_matrix.mean(0)).unsqueeze(0).repeat(total_chains, 1, 1), # HMC_v2 takes M
-                step_size_initial=current_hmc_step_size,
-                n_leapfrog_steps=self.hmc_n_leapfrog_steps,
-                num_samples_chain=self.hmc_chain_length, # Produce 1 sample per Gibbs iter
-                num_burnin_steps_hmc=self.hmc_burnin_steps,  # HMC internal burn-in (usually 0 after initial adaptation)
-                adapt_step_size=adapt_step_size,
-                adapt_mass_matrix=adapt_mass_matrix,
-                num_adapt_steps_total=current_n_adapt_hmc,
-                phi_min_bounds=phi_min_bounds, # Pass bounds to HMC
-                phi_max_bounds=phi_max_bounds
-            )
+            
+            ''' HMC-cosmo version-1 '''
+            # phi_cmb_new, hmc_step_size_new, hmc_inv_mass_new, _ = sample_hmc_cosmo(
+            #     log_prob_fn=hmc_log_posterior_fn,
+            #     log_grad_fn=hmc_gradient_log_posterior_fn,
+            #     phi_init=phi_cmb_current.detach(), # Start HMC from current Phi_CMB
+            #     mass_matrix_M_input=None if current_hmc_inv_mass_matrix is None else torch.linalg.inv(current_hmc_inv_mass_matrix.mean(0)).unsqueeze(0).repeat(total_chains, 1, 1), # HMC_v2 takes M
+            #     step_size_initial=current_hmc_step_size,
+            #     n_leapfrog_steps=self.hmc_n_leapfrog_steps,
+            #     num_samples_chain=self.hmc_chain_length, # Produce 1 sample per Gibbs iter
+            #     num_burnin_steps_hmc=self.hmc_burnin_steps,  # HMC internal burn-in (usually 0 after initial adaptation)
+            #     adapt_step_size=adapt_step_size,
+            #     adapt_mass_matrix=adapt_mass_matrix,
+            #     num_adapt_steps_total=current_n_adapt_hmc,
+            #     phi_min_bounds=phi_min_bounds, # Pass bounds to HMC
+            #     phi_max_bounds=phi_max_bounds
+            # )
+            
+            ''' HMC-Version3 '''
+            if gibbs_iter == 0:
+                hmc = HMC(hmc_log_posterior_fn, log_prob_and_grad=hmc_gradient_log_posterior_fn)
+                hmc.set_collision_fn(collision_manager)
+
+                phi_cmb_new = hmc.sample(phi_cmb_current, nsamples=1, burnin=2, step_size=1e-5, nleap=(10, 15), epsadapt=5, verbose=False, ret_side_quantities=False)[:, 0, :].detach()
+                step_size = hmc.step_size
+                inv_mass_matrix = hmc.mass_matrix_inv
+                
+            else:
+                hmc = HMC(hmc_log_posterior_fn, log_prob_and_grad=hmc_gradient_log_posterior_fn)
+                hmc.set_collision_fn(collision_manager)
+                hmc.set_inv_mass_matrix(inv_mass_matrix, batch_dim=True)
+                phi_cmb_new = hmc.sample(phi_cmb_current, nsamples=1, burnin=2, step_size=step_size, nleap=(10, 15), epsadapt=0, verbose=False)[:, 0, :].detach()
+            
             lt = time.time()
 
             phi_cmb_current = phi_cmb_new.detach()
 
             # Update HMC step size and inv mass matrix if they were adapted
-            if adapt_step_size and adapt_mass_matrix:
-                current_hmc_step_size = hmc_step_size_new
-                current_hmc_inv_mass_matrix = hmc_inv_mass_new # This is M_inv from hmc_v2 if M was adapted
+            # if adapt_step_size and adapt_mass_matrix:
+            #     current_hmc_step_size = hmc_step_size_new
+            #     current_hmc_inv_mass_matrix = hmc_inv_mass_new # This is M_inv from hmc_v2 if M was adapted
 
             # Store results if past Gibbs burn-in
             if gibbs_iter >= n_it_burnin_gibbs:
@@ -537,8 +556,8 @@ class GibbsDiff2D_cosmo(nn.Module):
             n_it_gibbs=n_it_gibbs,
             n_it_burnin_gibbs=n_it_burnin_gibbs,
             return_chains_history=True, # Get all history for averaging
-            is_debug=True, 
-            sup_residual=eps
+            is_debug=is_debug, 
+            sup_residual=sup_residual,
             **hmc_kwargs
         )
         # phi_chains: [B, N_chains_gibbs, N_gibbs_samples, 3] -> [N_chains_gibbs, B, avg_pmean, 3]
